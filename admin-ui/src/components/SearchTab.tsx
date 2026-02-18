@@ -1,0 +1,1042 @@
+/* ============================================================================
+ * Search Tab — Knowledge Base search, Web search, URL Fetch
+ *
+ * Three search modes with result display, markdown preview, and feedback.
+ * ============================================================================ */
+
+import { useCallback, useRef, useState } from 'react';
+import { marked } from 'marked';
+import { apiFetch } from '../api/client';
+import { mcpClient } from '../api/mcp';
+import { useApp } from '../store';
+import type { DocumentDetail, FAQEntry, SearchDocument, WebSearchResult } from '../types';
+import { urlToDocId } from '../utils';
+import { FAQEntryDisplay, Modal, StarRating } from './ui';
+
+type SearchMode = 'qdrant' | 'web' | 'url';
+
+/* -------------------------------------------------------------------------- */
+/* Types for FAQ generation                                                   */
+/* -------------------------------------------------------------------------- */
+
+interface DuplicateCandidate {
+  id: string;
+  question: string;
+  answer: string;
+  score: number;
+  source_documents: { document_id: string; url?: string }[];
+  source_count: number;
+}
+
+interface GenerateFAQResponse {
+  question: string;
+  answer: string;
+  duplicates: DuplicateCandidate[];
+}
+
+export default function SearchTab() {
+  const [mode, setMode] = useState<SearchMode>('qdrant');
+
+  return (
+    <>
+      {/* Hero card */}
+      <div className="bg-white rounded-lg shadow-md p-8 mb-6">
+        <div className="max-w-4xl mx-auto">
+          <div className="text-center mb-6">
+            <h2 className="text-4xl font-bold text-blue-600 mb-2">🔍 Search &amp; Ingest</h2>
+            <p className="text-gray-600">Search local knowledge base, web, or ingest a specific URL</p>
+          </div>
+
+          {/* Mode selector */}
+          <div className="flex justify-center mb-6">
+            <div className="inline-flex rounded-lg border border-gray-200 bg-gray-50 p-1">
+              {([
+                { id: 'qdrant', label: '📚 Knowledge Base', color: 'blue' },
+                { id: 'web', label: '🌐 Web Search', color: 'green' },
+                { id: 'url', label: '🔗 Fetch URL', color: 'purple' },
+              ] as const).map((m) => (
+                <button
+                  key={m.id}
+                  onClick={() => setMode(m.id)}
+                  className={`px-4 py-2 text-sm font-medium rounded-md transition-colors ${
+                    mode === m.id
+                      ? `bg-${m.color}-600 text-white`
+                      : 'text-gray-700 hover:bg-gray-100'
+                  }`}
+                >
+                  {m.label}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {mode === 'qdrant' && <KnowledgeBaseSearch />}
+          {mode === 'web' && <WebSearchMode />}
+          {mode === 'url' && <UrlFetchMode />}
+        </div>
+      </div>
+    </>
+  );
+}
+
+/* -------------------------------------------------------------------------- */
+/* Knowledge Base Search                                                      */
+/* -------------------------------------------------------------------------- */
+
+function KnowledgeBaseSearch() {
+  const { refreshStats, currentCollection } = useApp();
+  const [query, setQuery] = useState('');
+  const [hybrid, setHybrid] = useState(true);
+  const [limit, setLimit] = useState(10);
+  const [faqs, setFaqs] = useState<FAQEntry[]>([]);
+  const [docs, setDocs] = useState<SearchDocument[]>([]);
+  const [previewContent, setPreviewContent] = useState('');
+  const [previewUrl, setPreviewUrl] = useState('');
+  const [previewDocId, setPreviewDocId] = useState('');
+  const [hasResults, setHasResults] = useState(false);
+  const [docModalOpen, setDocModalOpen] = useState(false);
+  const [docDetail, setDocDetail] = useState<DocumentDetail | null>(null);
+  const lastQuery = useRef('');
+
+  // FAQ generation state for preview panel
+  const [previewSelectedText, setPreviewSelectedText] = useState('');
+  const [previewFaqModal, setPreviewFaqModal] = useState(false);
+  const [previewGenerating, setPreviewGenerating] = useState(false);
+  const [previewFaqResult, setPreviewFaqResult] = useState<GenerateFAQResponse | null>(null);
+  const [previewEditQ, setPreviewEditQ] = useState('');
+  const [previewEditA, setPreviewEditA] = useState('');
+  const [previewSubmitting, setPreviewSubmitting] = useState(false);
+  const [previewSubmitStatus, setPreviewSubmitStatus] = useState('');
+
+  const search = useCallback(async () => {
+    if (!query.trim()) return;
+    lastQuery.current = query.trim();
+    try {
+      const result = await mcpClient.callTool<{ faqs?: FAQEntry[]; documents?: SearchDocument[] }>(
+        'search_knowledge_base',
+        { query: query.trim(), limit, collection_name: currentCollection || undefined },
+      );
+      setFaqs(result?.faqs || []);
+      setDocs(result?.documents || []);
+      setHasResults(true);
+      setPreviewContent('');
+    } catch (err) {
+      alert('Search failed: ' + (err instanceof Error ? err.message : err));
+    }
+  }, [query, limit, hybrid]);
+
+  const openPreview = (doc: SearchDocument) => {
+    setPreviewContent(doc.content);
+    setPreviewUrl(doc.url);
+    setPreviewDocId(doc.doc_id);
+    setPreviewSelectedText('');
+    setPreviewFaqResult(null);
+    setPreviewSubmitStatus('');
+  };
+
+  const viewDocDetail = async (docId: string, collection: string) => {
+    try {
+      const detail = await apiFetch<DocumentDetail>(
+        `/admin/documents/${docId}?collection_name=${encodeURIComponent(collection)}`,
+      );
+      setDocDetail(detail);
+      setDocModalOpen(true);
+    } catch (err) {
+      alert('Failed to load document: ' + (err instanceof Error ? err.message : err));
+    }
+  };
+
+  const extractFAQs = async (docId: string, collection: string) => {
+    if (!confirm('This will delete existing FAQ entries and re-extract new ones. Continue?')) return;
+    try {
+      const result = await apiFetch<{ deleted_facts?: { deleted?: number }; facts_extracted: number }>(
+        `/admin/documents/${docId}/extract?collection_name=${encodeURIComponent(collection)}`,
+        { method: 'POST' },
+      );
+      const deleted = typeof result.deleted_facts === 'object' ? result.deleted_facts?.deleted || 0 : 0;
+      alert(`Extraction complete!\nDeleted: ${deleted} old FAQ entries\nExtracted: ${result.facts_extracted} new FAQ entries`);
+      refreshStats();
+    } catch (err) {
+      alert('Error: ' + (err instanceof Error ? err.message : err));
+    }
+  };
+
+  return (
+    <>
+      {/* Search input */}
+      <div className="relative mb-4">
+        <input
+          type="text"
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          onKeyDown={(e) => e.key === 'Enter' && search()}
+          className="w-full px-6 py-4 text-lg border-2 border-gray-300 rounded-full focus:border-blue-500 focus:outline-none shadow-sm hover:shadow-md transition-shadow"
+          placeholder="Search documents and FAQ entries..."
+        />
+        <button onClick={search} className="absolute right-2 top-1/2 transform -translate-y-1/2 btn-primary px-6 py-2 rounded-full">
+          Search
+        </button>
+      </div>
+
+      <div className="flex items-center gap-4 text-sm text-gray-600">
+        <label className="flex items-center gap-2 cursor-pointer">
+          <input type="checkbox" checked={hybrid} onChange={(e) => setHybrid(e.target.checked)} className="h-4 w-4 text-blue-600" />
+          <span>Hybrid search (MCP default)</span>
+        </label>
+        <span className="text-gray-400">|</span>
+        <label className="flex items-center gap-2 cursor-pointer">
+          <input
+            type="number"
+            value={limit}
+            onChange={(e) => setLimit(parseInt(e.target.value) || 10)}
+            min={1}
+            max={50}
+            className="w-16 px-2 py-1 border rounded"
+          />
+          <span>results</span>
+        </label>
+      </div>
+
+      {/* Results */}
+      {hasResults && (
+        <div className="flex flex-col md:flex-row gap-6 items-start mt-6">
+          {/* Left: results list */}
+          <div className="w-full md:w-1/2 space-y-6">
+            {/* FAQ Entries */}
+            {faqs.length > 0 && (
+              <div className="bg-blue-50 border-l-4 border-blue-500 rounded-lg shadow-sm p-6">
+                <h3 className="text-lg font-semibold text-blue-900 mb-4">FAQ Entries</h3>
+                <div className="space-y-3">
+                  {faqs.map((faq, i) => (
+                    <FAQResult key={faq.id || i} faq={faq} searchQuery={lastQuery.current} />
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* Documents */}
+            <div>
+              <h3 className="text-lg font-semibold text-gray-800 mb-4">Documents</h3>
+              {docs.length === 0 ? (
+                <p className="text-gray-600 text-center py-8">No documents found.</p>
+              ) : (
+                <div className="space-y-4">
+                  {docs.map((doc, i) => (
+                    <DocResult key={doc.doc_id || i} doc={doc} onPreview={openPreview} searchQuery={lastQuery.current} />
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+
+          {/* Right: preview */}
+          <div className="w-full md:w-1/2 sticky top-8">
+            <div className="bg-white rounded-lg shadow-lg border-2 border-blue-100 overflow-hidden flex flex-col" style={{ maxHeight: 'calc(100vh - 100px)' }}>
+              <div className="bg-blue-600 px-4 py-3 flex justify-between items-center text-white">
+                <h3 className="font-bold">Markdown Preview</h3>
+                <div className="flex items-center gap-2">
+                  {previewSelectedText && previewUrl && (
+                    <button
+                      onClick={() => {
+                        setPreviewFaqModal(true);
+                        setPreviewFaqResult(null);
+                        setPreviewSubmitStatus('');
+                        // Auto-generate on open
+                        (async () => {
+                          setPreviewGenerating(true);
+                          try {
+                            const result = await apiFetch<GenerateFAQResponse>('/admin/documents/generate-faq', {
+                              method: 'POST',
+                              body: JSON.stringify({
+                                selected_text: previewSelectedText,
+                                source_url: previewUrl,
+                                document_id: previewDocId || undefined,
+                                collection_name: currentCollection,
+                              }),
+                            });
+                            setPreviewFaqResult(result);
+                            setPreviewEditQ(result.question);
+                            setPreviewEditA(result.answer);
+                          } catch (err) {
+                            alert('FAQ generation failed: ' + (err instanceof Error ? err.message : err));
+                            setPreviewFaqModal(false);
+                          } finally {
+                            setPreviewGenerating(false);
+                          }
+                        })();
+                      }}
+                      className="px-3 py-1 bg-amber-500 hover:bg-amber-600 text-white text-xs rounded font-medium"
+                    >
+                      🤖 Generate FAQ
+                    </button>
+                  )}
+                  <button onClick={() => { setPreviewContent(''); setPreviewSelectedText(''); }} className="hover:bg-blue-700 rounded p-1">✕</button>
+                </div>
+              </div>
+              {previewSelectedText && (
+                <div className="px-4 py-2 bg-amber-50 border-b border-amber-200 text-xs text-amber-800">
+                  Selected: "{previewSelectedText.substring(0, 100)}{previewSelectedText.length > 100 ? '…' : ''}"
+                </div>
+              )}
+              <div
+                className="p-6 overflow-y-auto markdown-content text-sm text-gray-800 bg-gray-50 flex-1 cursor-text select-text"
+                onMouseUp={() => {
+                  const sel = window.getSelection();
+                  const text = sel?.toString().trim() || '';
+                  if (text.length >= 10) setPreviewSelectedText(text);
+                }}
+              >
+                {previewContent ? (
+                  <div dangerouslySetInnerHTML={{ __html: marked.parse(previewContent) as string }} />
+                ) : (
+                  <div className="flex flex-col items-center justify-center h-full text-gray-400 py-20">
+                    <p>Select a result to preview its content here.</p>
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Document detail modal */}
+      <Modal open={docModalOpen} onClose={() => setDocModalOpen(false)} title="Document Details" maxWidth="max-w-4xl">
+        {docDetail && <DocumentDetailView doc={docDetail} onExtractFAQs={extractFAQs} />}
+      </Modal>
+
+      {/* Preview FAQ generation modal */}
+      <Modal
+        open={previewFaqModal}
+        onClose={() => setPreviewFaqModal(false)}
+        title="Generate FAQ from Selection"
+        maxWidth="max-w-2xl"
+      >
+        {previewGenerating ? (
+          <div className="text-center py-8">
+            <div className="loading-spinner mx-auto mb-2" />
+            <p className="text-sm text-gray-500">Generating FAQ with LLM...</p>
+          </div>
+        ) : previewFaqResult ? (
+          <div className="space-y-4">
+            <div className="p-3 bg-gray-50 rounded text-xs text-gray-600">
+              <strong>Source:</strong>{' '}
+              <a href={previewUrl} target="_blank" rel="noreferrer" className="text-blue-600 hover:underline">
+                {previewUrl}
+              </a>
+            </div>
+            <div>
+              <label className="block text-sm font-semibold text-gray-700 mb-1">Question</label>
+              <textarea
+                value={previewEditQ}
+                onChange={(e) => setPreviewEditQ(e.target.value)}
+                rows={2}
+                className="w-full form-input px-3 py-2 rounded-md"
+              />
+            </div>
+            <div>
+              <label className="block text-sm font-semibold text-gray-700 mb-1">Answer</label>
+              <textarea
+                value={previewEditA}
+                onChange={(e) => setPreviewEditA(e.target.value)}
+                rows={4}
+                className="w-full form-input px-3 py-2 rounded-md"
+              />
+            </div>
+            <div className="flex items-center gap-3">
+              <button
+                onClick={async () => {
+                  if (!previewEditQ.trim() || !previewEditA.trim()) return;
+                  setPreviewSubmitting(true);
+                  setPreviewSubmitStatus('');
+                  try {
+                    const result = await apiFetch<{ ok: boolean; action: string; faq_id: string }>('/admin/documents/submit-faq', {
+                      method: 'POST',
+                      body: JSON.stringify({
+                        question: previewEditQ.trim(),
+                        answer: previewEditA.trim(),
+                        source_url: previewUrl,
+                        document_id: previewDocId || undefined,
+                        collection_name: currentCollection,
+                      }),
+                    });
+                    setPreviewSubmitStatus(`✓ Created new FAQ entry`);
+                    setTimeout(() => { setPreviewFaqModal(false); setPreviewSelectedText(''); }, 1500);
+                  } catch (err) {
+                    setPreviewSubmitStatus('✗ Error: ' + (err instanceof Error ? err.message : err));
+                  } finally {
+                    setPreviewSubmitting(false);
+                  }
+                }}
+                disabled={previewSubmitting || !previewEditQ.trim() || !previewEditA.trim()}
+                className="btn-success text-sm"
+              >
+                {previewSubmitting ? 'Submitting...' : '✓ Create New FAQ'}
+              </button>
+              <button onClick={() => setPreviewFaqModal(false)} className="btn-secondary text-sm">
+                Cancel
+              </button>
+            </div>
+            {previewSubmitStatus && (
+              <div className={`text-sm ${previewSubmitStatus.startsWith('✓') ? 'text-green-600' : 'text-red-600'}`}>
+                {previewSubmitStatus}
+              </div>
+            )}
+
+            {/* Duplicate candidates */}
+            {previewFaqResult.duplicates.length > 0 && (
+              <div className="border-t pt-3">
+                <h5 className="text-sm font-semibold text-gray-700 mb-2">
+                  🔍 Similar existing FAQs — merge source instead?
+                </h5>
+                <div className="space-y-2 max-h-48 overflow-y-auto">
+                  {previewFaqResult.duplicates.map((dup) => (
+                    <div key={dup.id} className="bg-gray-50 p-3 rounded border hover:shadow-sm transition-shadow">
+                      <div className="flex justify-between items-start gap-2">
+                        <div className="flex-1 min-w-0">
+                          <FAQEntryDisplay question={dup.question} answer={dup.answer} />
+                          <div className="mt-1 flex gap-3 text-xs text-gray-400">
+                            <span>Score: {dup.score.toFixed(3)}</span>
+                            <span>{dup.source_count} source{dup.source_count !== 1 ? 's' : ''}</span>
+                          </div>
+                        </div>
+                        <button
+                          onClick={async () => {
+                            setPreviewSubmitting(true);
+                            setPreviewSubmitStatus('');
+                            try {
+                              const result = await apiFetch<{ ok: boolean; action: string; source_count?: number }>('/admin/documents/submit-faq', {
+                                method: 'POST',
+                                body: JSON.stringify({
+                                  question: previewEditQ.trim(),
+                                  answer: previewEditA.trim(),
+                                  source_url: previewUrl,
+                                  document_id: previewDocId || undefined,
+                                  collection_name: currentCollection,
+                                  merge_with_id: dup.id,
+                                }),
+                              });
+                              setPreviewSubmitStatus(`✓ Merged — source added (${result.source_count} total)`);
+                              setTimeout(() => { setPreviewFaqModal(false); setPreviewSelectedText(''); }, 1500);
+                            } catch (err) {
+                              setPreviewSubmitStatus('✗ Error: ' + (err instanceof Error ? err.message : err));
+                            } finally {
+                              setPreviewSubmitting(false);
+                            }
+                          }}
+                          disabled={previewSubmitting}
+                          className="btn-primary text-xs px-3 py-1 flex-shrink-0"
+                        >
+                          Merge Source
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+        ) : null}
+      </Modal>
+    </>
+  );
+}
+
+/* -------------------------------------------------------------------------- */
+/* FAQ search result with feedback                                            */
+/* -------------------------------------------------------------------------- */
+
+function FAQResult({ faq, searchQuery }: { faq: FAQEntry; searchQuery: string }) {
+  const [feedbackStatus, setFeedbackStatus] = useState('');
+  const [disabled, setDisabled] = useState(false);
+
+  const submitFeedback = async (rating: number, rank?: number) => {
+    if (!searchQuery) return;
+    setDisabled(true);
+    setFeedbackStatus('Submitting...');
+    try {
+      const body: Record<string, unknown> = {
+        query: searchQuery,
+        faq_id: faq.id,
+        faq_text: `Q: ${faq.question}\nA: ${faq.answer}`.substring(0, 500),
+        search_score: faq.score || 0,
+        user_rating: rating,
+        content_type: 'faq',
+      };
+      if (rank != null) body.ranking_score = rank;
+      await apiFetch('/feedback', { method: 'POST', body: JSON.stringify(body) });
+      setFeedbackStatus(rank != null ? `✓ Ranked ${rank}/5` : rating === 1 ? '✓ Relevant' : '✓ Irrelevant');
+    } catch {
+      setFeedbackStatus('Error');
+      setDisabled(false);
+    }
+  };
+
+  return (
+    <div className="bg-white p-4 rounded border-l-4 border-blue-400">
+      <FAQEntryDisplay question={faq.question} answer={faq.answer} />
+      {faq.score != null && <span className="ml-auto text-xs text-gray-500 float-right">Score: {faq.score.toFixed(3)}</span>}
+      {faq.source_documents && faq.source_documents.length > 0 && (
+        <div className="mt-2 text-xs text-gray-500">
+          Sources:{' '}
+          {faq.source_documents.map((s, i) => {
+            try {
+              const hostname = s.url ? new URL(s.url).hostname : 'unknown';
+              return (
+                <span key={i}>
+                  {i > 0 && ', '}
+                  <a href={s.url || '#'} target="_blank" rel="noreferrer" className="text-blue-600 hover:underline">
+                    {hostname}
+                  </a>
+                </span>
+              );
+            } catch {
+              return <span key={i}>{i > 0 && ', '}{s.document_id || 'unknown'}</span>;
+            }
+          })}
+        </div>
+      )}
+
+      {/* Feedback row */}
+      <div className="mt-3 flex items-center gap-2 border-t pt-2 flex-wrap">
+        <span className="text-xs text-gray-500">Relevant?</span>
+        <button disabled={disabled} onClick={() => submitFeedback(1)} className="px-2 py-1 rounded text-xs bg-green-100 hover:bg-green-200 text-green-700 disabled:opacity-50">👍</button>
+        <button disabled={disabled} onClick={() => submitFeedback(-1)} className="px-2 py-1 rounded text-xs bg-red-100 hover:bg-red-200 text-red-700 disabled:opacity-50">👎</button>
+        <span className="text-xs text-gray-400 mx-1">|</span>
+        <span className="text-xs text-gray-500">Rank:</span>
+        <StarRating
+          disabled={disabled}
+          onRate={(s) => submitFeedback(s >= 4 ? 1 : s <= 2 ? -1 : 0, s)}
+        />
+        <span className="text-xs text-gray-400 ml-2">{feedbackStatus}</span>
+      </div>
+    </div>
+  );
+}
+
+/* -------------------------------------------------------------------------- */
+/* Document search result with feedback                                       */
+/* -------------------------------------------------------------------------- */
+
+function DocResult({
+  doc,
+  onPreview,
+  searchQuery,
+}: {
+  doc: SearchDocument;
+  onPreview: (doc: SearchDocument) => void;
+  searchQuery: string;
+}) {
+  const [feedbackStatus, setFeedbackStatus] = useState('');
+  const [disabled, setDisabled] = useState(false);
+
+  const submitFeedback = async (rating: number, rank?: number) => {
+    if (!searchQuery) return;
+    setDisabled(true);
+    setFeedbackStatus('Submitting...');
+    try {
+      let docId = doc.doc_id;
+      if (!docId && doc.url) docId = urlToDocId(doc.url);
+      const body: Record<string, unknown> = {
+        query: searchQuery,
+        doc_id: docId,
+        doc_url: doc.url,
+        doc_content: doc.content,
+        search_score: doc.score,
+        user_rating: rating,
+        content_type: 'document',
+      };
+      if (rank != null) body.ranking_score = rank;
+      await apiFetch('/feedback', { method: 'POST', body: JSON.stringify(body) });
+      setFeedbackStatus(rank != null ? `✓ Ranked ${rank}/5` : rating === 1 ? '✓ Relevant' : '✓ Irrelevant');
+    } catch {
+      setFeedbackStatus('Error');
+      setDisabled(false);
+    }
+  };
+
+  return (
+    <div className="bg-white p-4 rounded-lg shadow-sm border hover:shadow-md transition-shadow">
+      <div className="flex justify-between items-start mb-2 gap-4">
+        <a href={doc.url} target="_blank" rel="noreferrer" className="text-lg font-semibold text-blue-600 hover:underline block truncate flex-1 min-w-0">
+          {doc.url}
+        </a>
+        <span className="text-xs px-2 py-1 bg-gray-100 text-gray-600 rounded flex-shrink-0">
+          Score: {doc.score.toFixed(3)}
+        </span>
+      </div>
+      <p className="text-sm text-gray-700 mb-2">
+        {doc.content.substring(0, 300)}
+        {doc.content.length > 300 && '...'}
+      </p>
+      <div className="flex gap-3 items-center">
+        <button onClick={() => onPreview(doc)} className="btn-primary text-xs">Preview</button>
+        <a href={doc.url} target="_blank" rel="noreferrer" className="text-sm text-blue-600 hover:underline">Open Link</a>
+      </div>
+
+      {/* Feedback row */}
+      <div className="mt-3 flex items-center gap-2 border-t pt-2 flex-wrap">
+        <span className="text-xs text-gray-500">Relevant?</span>
+        <button disabled={disabled} onClick={() => submitFeedback(1)} className="px-2 py-1 rounded text-xs bg-green-100 hover:bg-green-200 text-green-700 disabled:opacity-50">👍</button>
+        <button disabled={disabled} onClick={() => submitFeedback(-1)} className="px-2 py-1 rounded text-xs bg-red-100 hover:bg-red-200 text-red-700 disabled:opacity-50">👎</button>
+        <span className="text-xs text-gray-400 mx-1">|</span>
+        <span className="text-xs text-gray-500">Rank:</span>
+        <StarRating disabled={disabled} onRate={(s) => submitFeedback(s >= 4 ? 1 : s <= 2 ? -1 : 0, s)} />
+        <span className="text-xs text-gray-400 ml-2">{feedbackStatus}</span>
+      </div>
+    </div>
+  );
+}
+
+/* -------------------------------------------------------------------------- */
+/* Document detail view (inside modal)                                        */
+/* -------------------------------------------------------------------------- */
+
+function DocumentDetailView({
+  doc,
+  onExtractFAQs,
+}: {
+  doc: DocumentDetail;
+  onExtractFAQs: (docId: string, collection: string) => void;
+}) {
+  const { currentCollection } = useApp();
+  const contentRef = useRef<HTMLDivElement>(null);
+  const [selectedText, setSelectedText] = useState('');
+  const [generating, setGenerating] = useState(false);
+  const [faqResult, setFaqResult] = useState<GenerateFAQResponse | null>(null);
+  const [editQuestion, setEditQuestion] = useState('');
+  const [editAnswer, setEditAnswer] = useState('');
+  const [submitting, setSubmitting] = useState(false);
+  const [submitStatus, setSubmitStatus] = useState('');
+
+  /** Capture text selection from the content area */
+  const handleMouseUp = () => {
+    const sel = window.getSelection();
+    const text = sel?.toString().trim() || '';
+    if (text.length >= 10) {
+      setSelectedText(text);
+    }
+  };
+
+  /** Call LLM to generate a FAQ from the selected text */
+  const generateFAQ = async () => {
+    if (!selectedText || selectedText.length < 10) return;
+    setGenerating(true);
+    setFaqResult(null);
+    setSubmitStatus('');
+    try {
+      const result = await apiFetch<GenerateFAQResponse>('/admin/documents/generate-faq', {
+        method: 'POST',
+        body: JSON.stringify({
+          selected_text: selectedText,
+          source_url: doc.url,
+          document_id: doc.doc_id,
+          collection_name: currentCollection,
+        }),
+      });
+      setFaqResult(result);
+      setEditQuestion(result.question);
+      setEditAnswer(result.answer);
+    } catch (err) {
+      alert('FAQ generation failed: ' + (err instanceof Error ? err.message : err));
+    } finally {
+      setGenerating(false);
+    }
+  };
+
+  /** Submit a new FAQ entry */
+  const submitFAQ = async (mergeWithId?: string) => {
+    if (!editQuestion.trim() || !editAnswer.trim()) return;
+    setSubmitting(true);
+    setSubmitStatus('');
+    try {
+      const result = await apiFetch<{ ok: boolean; action: string; faq_id: string; source_count?: number }>(
+        '/admin/documents/submit-faq',
+        {
+          method: 'POST',
+          body: JSON.stringify({
+            question: editQuestion.trim(),
+            answer: editAnswer.trim(),
+            source_url: doc.url,
+            document_id: doc.doc_id,
+            collection_name: currentCollection,
+            merge_with_id: mergeWithId || null,
+          }),
+        },
+      );
+      if (result.action === 'merged') {
+        setSubmitStatus(`✓ Merged — source added (${result.source_count} total sources)`);
+      } else {
+        setSubmitStatus(`✓ Created new FAQ entry`);
+      }
+      // Reset for next selection
+      setSelectedText('');
+      setFaqResult(null);
+    } catch (err) {
+      setSubmitStatus('✗ Error: ' + (err instanceof Error ? err.message : err));
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  return (
+    <>
+      <p className="text-sm text-gray-600 mb-1">
+        Document ID: <code className="bg-gray-100 px-2 py-1 rounded">{doc.doc_id}</code>
+      </p>
+      <p className="text-sm text-gray-600 mb-4">
+        URL:{' '}
+        <a href={doc.url} target="_blank" rel="noreferrer" className="text-blue-600 hover:underline">
+          {doc.url}
+        </a>
+      </p>
+
+      {/* FAQ generation hint */}
+      <div className="mb-3 p-3 bg-amber-50 border border-amber-200 rounded-lg text-sm text-amber-800">
+        <strong>💡 Generate FAQ:</strong> Select text in the content below, then click "Generate FAQ from Selection" to create a Q&A pair.
+      </div>
+
+      <h4 className="font-semibold mb-2">Content</h4>
+      <div
+        ref={contentRef}
+        onMouseUp={handleMouseUp}
+        className="bg-gray-50 p-4 rounded max-h-96 overflow-y-auto markdown-content mb-2 cursor-text select-text"
+        dangerouslySetInnerHTML={{ __html: marked.parse(doc.content) as string }}
+      />
+
+      {/* Selection & Generate bar */}
+      <div className="flex items-center gap-3 mb-4">
+        {selectedText ? (
+          <>
+            <span className="text-xs text-gray-500 truncate max-w-xs" title={selectedText}>
+              Selected: "{selectedText.substring(0, 80)}{selectedText.length > 80 ? '…' : ''}"
+            </span>
+            <button
+              onClick={generateFAQ}
+              disabled={generating}
+              className="btn-primary text-sm flex items-center gap-2"
+            >
+              {generating ? (
+                <>
+                  <span className="loading-spinner" style={{ width: 14, height: 14 }} />
+                  Generating...
+                </>
+              ) : (
+                '🤖 Generate FAQ from Selection'
+              )}
+            </button>
+            <button onClick={() => { setSelectedText(''); setFaqResult(null); setSubmitStatus(''); }} className="btn-secondary text-xs">
+              Clear
+            </button>
+          </>
+        ) : (
+          <span className="text-xs text-gray-400 italic">Select text above to generate a FAQ entry</span>
+        )}
+      </div>
+
+      {/* Generated FAQ review panel */}
+      {faqResult && (
+        <div className="mb-6 border-2 border-blue-200 rounded-lg overflow-hidden">
+          <div className="bg-blue-600 px-4 py-2 text-white font-semibold text-sm">
+            Generated FAQ — Review & Edit
+          </div>
+          <div className="p-4 space-y-3">
+            <div>
+              <label className="block text-sm font-semibold text-gray-700 mb-1">Question</label>
+              <textarea
+                value={editQuestion}
+                onChange={(e) => setEditQuestion(e.target.value)}
+                rows={2}
+                className="w-full form-input px-3 py-2 rounded-md text-sm"
+              />
+            </div>
+            <div>
+              <label className="block text-sm font-semibold text-gray-700 mb-1">Answer</label>
+              <textarea
+                value={editAnswer}
+                onChange={(e) => setEditAnswer(e.target.value)}
+                rows={4}
+                className="w-full form-input px-3 py-2 rounded-md text-sm"
+              />
+            </div>
+            <div className="flex items-center gap-3">
+              <button
+                onClick={() => submitFAQ()}
+                disabled={submitting || !editQuestion.trim() || !editAnswer.trim()}
+                className="btn-success text-sm"
+              >
+                {submitting ? 'Submitting...' : '✓ Create New FAQ'}
+              </button>
+              <button
+                onClick={() => { setFaqResult(null); setSubmitStatus(''); }}
+                className="btn-secondary text-sm"
+              >
+                Discard
+              </button>
+            </div>
+            {submitStatus && (
+              <div className={`text-sm ${submitStatus.startsWith('✓') ? 'text-green-600' : 'text-red-600'}`}>
+                {submitStatus}
+              </div>
+            )}
+
+            {/* Duplicate candidates */}
+            {faqResult.duplicates.length > 0 && (
+              <div className="mt-4 border-t pt-3">
+                <h5 className="text-sm font-semibold text-gray-700 mb-2">
+                  🔍 Similar existing FAQs — merge source instead?
+                </h5>
+                <div className="space-y-2 max-h-64 overflow-y-auto">
+                  {faqResult.duplicates.map((dup) => (
+                    <div key={dup.id} className="bg-gray-50 p-3 rounded border hover:shadow-sm transition-shadow">
+                      <div className="flex justify-between items-start gap-2">
+                        <div className="flex-1 min-w-0">
+                          <FAQEntryDisplay question={dup.question} answer={dup.answer} />
+                          <div className="mt-1 flex gap-3 text-xs text-gray-400">
+                            <span>Score: {dup.score.toFixed(3)}</span>
+                            <span>{dup.source_count} source{dup.source_count !== 1 ? 's' : ''}</span>
+                          </div>
+                        </div>
+                        <button
+                          onClick={() => submitFAQ(dup.id)}
+                          disabled={submitting}
+                          className="btn-primary text-xs px-3 py-1 flex-shrink-0"
+                          title="Add this document as a source to the existing FAQ"
+                        >
+                          Merge Source
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      <h4 className="font-semibold mb-2">Metadata</h4>
+      <pre className="bg-gray-50 p-4 rounded text-sm overflow-x-auto mb-4">{JSON.stringify(doc.metadata, null, 2)}</pre>
+
+      <div className="flex justify-between items-center mb-2">
+        <h4 className="font-semibold">Extracted FAQ Entries ({doc.faqs_count})</h4>
+        <button onClick={() => onExtractFAQs(doc.doc_id, currentCollection)} className="btn-success text-sm">
+          {doc.faqs_count > 0 ? 'Re-extract FAQs' : 'Extract FAQs'}
+        </button>
+      </div>
+      <div className="space-y-2 max-h-64 overflow-y-auto">
+        {doc.faqs.length === 0 ? (
+          <p className="text-gray-500 text-sm italic">No FAQ entries extracted yet.</p>
+        ) : (
+          doc.faqs.map((f) => (
+            <div key={f.id} className="bg-gray-50 p-3 rounded">
+              <FAQEntryDisplay question={f.question} answer={f.answer} />
+            </div>
+          ))
+        )}
+      </div>
+    </>
+  );
+}
+
+/* -------------------------------------------------------------------------- */
+/* Web Search mode                                                            */
+/* -------------------------------------------------------------------------- */
+
+function WebSearchMode() {
+  const [query, setQuery] = useState('');
+  const [limit, setLimit] = useState(5);
+  const [country, setCountry] = useState('DE');
+  const [lang, setLang] = useState('de');
+  const [loading, setLoading] = useState(false);
+  const [results, setResults] = useState<WebSearchResult[]>([]);
+  const [statusMsg, setStatusMsg] = useState('');
+  const { refreshStats } = useApp();
+
+  const performSearch = async () => {
+    if (!query.trim()) return;
+    setLoading(true);
+    setStatusMsg('');
+    try {
+      const result = await mcpClient.callTool<{ results?: WebSearchResult[] }>('web_search', {
+        query: query.trim(),
+        limit,
+        country,
+        language: lang,
+      });
+      const items = result?.results || [];
+      setResults(items);
+      setStatusMsg(`Found ${items.length} results for "${query.trim()}"`);
+      setQuery('');
+      setTimeout(() => refreshStats(), 5000);
+    } catch (err) {
+      alert('Web search failed: ' + (err instanceof Error ? err.message : err));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <>
+      <div className="relative mb-4">
+        <input
+          type="text"
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          onKeyDown={(e) => e.key === 'Enter' && performSearch()}
+          className="w-full px-6 py-4 text-lg border-2 border-gray-300 rounded-full focus:border-green-500 focus:outline-none shadow-sm hover:shadow-md transition-shadow"
+          placeholder="Search the web for content to ingest..."
+        />
+        <button
+          onClick={performSearch}
+          disabled={loading}
+          className="absolute right-2 top-1/2 transform -translate-y-1/2 btn-success px-6 py-2 rounded-full"
+        >
+          {loading ? (
+            <span className="flex items-center gap-2">
+              Searching...
+              <span className="loading-spinner" style={{ width: 14, height: 14 }} />
+            </span>
+          ) : (
+            'Search & Ingest'
+          )}
+        </button>
+      </div>
+
+      <div className="flex flex-wrap items-center gap-4 text-sm text-gray-600">
+        <label className="flex items-center gap-2">
+          <input type="number" value={limit} onChange={(e) => setLimit(parseInt(e.target.value) || 5)} min={1} max={20} className="w-16 px-2 py-1 border rounded" />
+          <span>results</span>
+        </label>
+        <span className="text-gray-400">|</span>
+        <label className="flex items-center gap-2">
+          <select value={country} onChange={(e) => setCountry(e.target.value)} className="px-2 py-1 border rounded">
+            {[['DE', 'Germany'], ['US', 'United States'], ['GB', 'United Kingdom'], ['FR', 'France'], ['ES', 'Spain'], ['IT', 'Italy'], ['AT', 'Austria'], ['CH', 'Switzerland']].map(([v, l]) => (
+              <option key={v} value={v}>{l}</option>
+            ))}
+          </select>
+          <span>country</span>
+        </label>
+        <span className="text-gray-400">|</span>
+        <label className="flex items-center gap-2">
+          <select value={lang} onChange={(e) => setLang(e.target.value)} className="px-2 py-1 border rounded">
+            {[['de', 'Deutsch'], ['en', 'English'], ['fr', 'Français'], ['es', 'Español'], ['it', 'Italiano']].map(([v, l]) => (
+              <option key={v} value={v}>{l}</option>
+            ))}
+          </select>
+          <span>language</span>
+        </label>
+      </div>
+
+      {/* Status */}
+      {statusMsg && (
+        <div className="mt-6 bg-green-50 border-l-4 border-green-500 rounded-lg shadow-sm p-6">
+          <h3 className="font-semibold text-green-900 mb-2">Search Complete!</h3>
+          <p className="text-sm text-green-800">{statusMsg}</p>
+          <p className="mt-2 text-xs text-green-700"><strong>Background ingestion in progress...</strong> URLs are being scraped, embedded, and indexed.</p>
+        </div>
+      )}
+
+      {/* Results */}
+      {results.length > 0 && (
+        <div className="mt-6 bg-white rounded-lg shadow-md p-6">
+          <h3 className="text-lg font-semibold text-gray-800 mb-4">Search Results (being ingested)</h3>
+          <div className="space-y-3">
+            {results.map((r, i) => (
+              <div key={i} className="flex items-start gap-3 p-3 bg-gray-50 rounded-lg">
+                <div className="flex-shrink-0 w-8 h-8 bg-green-100 text-green-700 rounded-full flex items-center justify-center font-semibold">{i + 1}</div>
+                <div className="flex-1 min-w-0">
+                  <a href={r.url} target="_blank" rel="noreferrer" className="text-blue-600 hover:underline font-medium truncate block">
+                    {r.title || r.url}
+                  </a>
+                  <p className="text-sm text-gray-600 mt-1 line-clamp-3">{(r.description || '').substring(0, 300)}</p>
+                  <p className="text-xs text-gray-400 mt-1">{r.url}</p>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </>
+  );
+}
+
+/* -------------------------------------------------------------------------- */
+/* URL Fetch mode                                                             */
+/* -------------------------------------------------------------------------- */
+
+function UrlFetchMode() {
+  const [url, setUrl] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
+  const [success, setSuccess] = useState('');
+  const [content, setContent] = useState('');
+  const { refreshStats } = useApp();
+
+  const fetchUrl = async () => {
+    setError('');
+    setSuccess('');
+    setContent('');
+    if (!url.trim()) {
+      setError('Please enter a URL');
+      return;
+    }
+    try {
+      new URL(url.trim());
+    } catch {
+      setError('Please enter a valid URL');
+      return;
+    }
+
+    setLoading(true);
+    try {
+      const result = await mcpClient.callTool<{ title?: string; indexed?: boolean; content?: string; markdown?: string; text?: string }>('read_url', { url: url.trim() });
+      const title = result?.title ? `Title: ${result.title}` : 'Document fetched.';
+      setSuccess(result?.indexed ? `${title} Indexed into knowledge base.` : `${title} Returned without indexing.`);
+      setContent(result?.content || result?.markdown || result?.text || '');
+      setUrl('');
+      refreshStats();
+    } catch (err) {
+      setError('Error: ' + (err instanceof Error ? err.message : err));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <>
+      <div className="relative mb-4">
+        <input
+          type="text"
+          value={url}
+          onChange={(e) => setUrl(e.target.value)}
+          onKeyDown={(e) => e.key === 'Enter' && fetchUrl()}
+          className="w-full px-6 py-4 text-lg border-2 border-gray-300 rounded-full focus:border-purple-500 focus:outline-none shadow-sm hover:shadow-md transition-shadow"
+          placeholder="https://example.com/page"
+        />
+        <button
+          onClick={fetchUrl}
+          disabled={loading}
+          className="absolute right-2 top-1/2 transform -translate-y-1/2 px-6 py-2 rounded-full bg-purple-600 text-white hover:bg-purple-700 disabled:opacity-50"
+        >
+          {loading ? (
+            <span className="flex items-center gap-2">
+              Fetching...
+              <span className="loading-spinner" style={{ width: 14, height: 14 }} />
+            </span>
+          ) : (
+            'Fetch & Ingest'
+          )}
+        </button>
+      </div>
+
+      {error && <div className="mt-2 text-red-600 text-sm">{error}</div>}
+      {success && <div className="mt-2 text-green-600 text-sm">{success}</div>}
+      {content && (
+        <details className="mt-4">
+          <summary className="cursor-pointer text-sm text-gray-700">Fetched content</summary>
+          <pre className="mt-2 p-3 bg-gray-50 border rounded-lg text-xs text-gray-700 whitespace-pre-wrap">{content}</pre>
+        </details>
+      )}
+    </>
+  );
+}

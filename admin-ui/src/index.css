@@ -1,0 +1,61 @@
+body {
+  -webkit-overflow-scrolling: touch;
+  overflow-x: hidden;
+}
+
+/* --- Tab styles --- */
+.tab-button {
+  padding: 0.75rem 1.5rem;
+  border-bottom: 3px solid transparent;
+  transition: all 0.2s;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.tab-button:hover { background-color: rgba(59, 130, 246, 0.1); }
+.tab-button.active { border-bottom-color: #3b82f6; color: #3b82f6; font-weight: 600; }
+
+/* --- Form inputs --- */
+.form-input { background-color: #fff; border: 2px solid #d1d5db; color: #1f2937; }
+.form-input:focus { border-color: #3b82f6; box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.1); outline: none; }
+
+/* --- Spinner --- */
+.loading-spinner {
+  border: 3px solid #f3f4f6;
+  border-top: 3px solid #3b82f6;
+  border-radius: 50%;
+  width: 20px;
+  height: 20px;
+  animation: spin 1s linear infinite;
+  display: inline-block;
+}
+@keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+
+/* --- Button variants --- */
+.btn-primary { background-color: #3b82f6; color: white; padding: 0.5rem 1rem; border-radius: 0.375rem; font-weight: 600; transition: background-color 0.2s; border: none; cursor: pointer; }
+.btn-primary:hover { background-color: #2563eb; }
+.btn-primary:disabled { background-color: #d1d5db; cursor: not-allowed; }
+
+.btn-secondary { background-color: #6b7280; color: white; padding: 0.5rem 1rem; border-radius: 0.375rem; font-weight: 600; transition: background-color 0.2s; border: none; cursor: pointer; }
+.btn-secondary:hover { background-color: #4b5563; }
+
+.btn-danger { background-color: #ef4444; color: white; padding: 0.5rem 1rem; border-radius: 0.375rem; font-weight: 600; transition: background-color 0.2s; border: none; cursor: pointer; }
+.btn-danger:hover { background-color: #dc2626; }
+
+.btn-success { background-color: #22c55e; color: white; padding: 0.5rem 1rem; border-radius: 0.375rem; font-weight: 600; transition: background-color 0.2s; border: none; cursor: pointer; }
+.btn-success:hover { background-color: #16a34a; }
+
+/* --- Markdown content --- */
+.markdown-content h1 { font-size: 1.5rem; font-weight: bold; margin-top: 1rem; margin-bottom: 0.5rem; }
+.markdown-content h2 { font-size: 1.25rem; font-weight: bold; margin-top: 0.75rem; margin-bottom: 0.5rem; }
+.markdown-content h3 { font-size: 1.125rem; font-weight: bold; margin-top: 0.5rem; margin-bottom: 0.25rem; }
+.markdown-content p { margin-bottom: 0.75rem; }
+.markdown-content ul { list-style-type: disc; padding-left: 1.5rem; margin-bottom: 0.75rem; }
+.markdown-content ol { list-style-type: decimal; padding-left: 1.5rem; margin-bottom: 0.75rem; }
+.markdown-content code { background-color: #e5e7eb; padding: 0.125rem 0.25rem; border-radius: 0.25rem; font-family: monospace; }
+.markdown-content pre { background-color: #1f2937; color: #f3f4f6; padding: 1rem; border-radius: 0.5rem; overflow-x: auto; margin-bottom: 0.75rem; }
+.markdown-content blockquote { border-left: 4px solid #d1d5db; padding-left: 1rem; color: #4b5563; font-style: italic; margin-bottom: 0.75rem; }
+.markdown-content a { color: #3b82f6; text-decoration: underline; }
+.markdown-content img { max-width: 100%; height: auto; margin: 1rem 0; }
+.markdown-content table { border-collapse: collapse; width: 100%; margin-bottom: 1rem; }
+.markdown-content th, .markdown-content td { border: 1px solid #d1d5db; padding: 0.5rem; text-align: left; }
+.markdown-content th { background-color: #f3f4f6; }
