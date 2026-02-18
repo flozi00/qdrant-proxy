@@ -22,7 +22,6 @@ from services import (
     encode_dense,
     encode_query,
     ensure_faq_indexes,
-    generate_sparse_vector,
     get_faq_collection_name,
     parse_source_documents,
 )
@@ -70,7 +69,6 @@ async def admin_list_faqs(
         if search:
             query_colbert = await encode_query(search)
             query_dense = await encode_dense(search)
-            query_sparse = generate_sparse_vector(search)
 
             results = qdrant_client.query_points(
                 collection_name=faq_collection,
@@ -85,14 +83,6 @@ async def admin_list_faqs(
                     models.Prefetch(
                         query=query_dense,
                         using="dense",
-                        limit=limit * 5,
-                        filter=query_filter,
-                    ),
-                    models.Prefetch(
-                        query=models.SparseVector(
-                            indices=query_sparse.indices, values=query_sparse.values
-                        ),
-                        using="sparse",
                         limit=limit * 5,
                         filter=query_filter,
                     ),

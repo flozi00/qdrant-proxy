@@ -1,6 +1,6 @@
 # Search Pipeline
 
-## Triple-Vector Embedding Strategy
+## Dual-Vector Embedding Strategy
 
 ```mermaid
 flowchart LR
@@ -11,18 +11,15 @@ flowchart LR
     subgraph Encoding["Parallel Encoding"]
         ColBERT["ColBERT\n(ModernColBERT via vLLM)"]
         Dense["Dense\n(Qwen3-Embedding via vLLM)"]
-        Sparse["Sparse\n(BM25 + IDF)"]
     end
     
     subgraph Vectors["Vector Types"]
         MV["Multivector\n128-dim per token\nMaxSim scoring"]
         DV["Dense Vector\n1024-dim\nCosine similarity"]
-        SV["Sparse Vector\nTerm frequencies\nInverted index"]
     end
     
     Text --> ColBERT --> MV
     Text --> Dense --> DV
-    Text --> Sparse --> SV
 ```
 
 ### Collection Schema
@@ -39,9 +36,6 @@ vectors_config = {
         distance=Cosine
     )
 }
-sparse_vectors_config = {
-    "sparse": SparseVectorParams()  # BM25 with IDF
-}
 ```
 
 ## Hybrid Search Flow
@@ -52,21 +46,15 @@ sequenceDiagram
     participant Client
     participant Search
     participant Dense as Dense HNSW
-    participant Sparse as Sparse Index
     participant ColBERT as ColBERT MaxSim
     participant FAQs as FAQ Knowledge Base
 
     Client->>Search: POST /search (query, filters)
     
     rect rgb(200, 220, 255)
-        Note over Search,Sparse: Stage 1: Fast Prefetch
-        par Dense Retrieval
-            Search->>Dense: query_dense (HNSW ef=128)
-            Dense-->>Search: top-N candidates
-        and Sparse Retrieval
-            Search->>Sparse: query_sparse (BM25)
-            Sparse-->>Search: top-N candidates
-        end
+        Note over Search,Dense: Stage 1: Fast Prefetch
+        Search->>Dense: query_dense (HNSW ef=128)
+        Dense-->>Search: top-N candidates
     end
     
     rect rgb(220, 255, 220)
@@ -116,7 +104,6 @@ flowchart TD
     subgraph Embedding["Embedding Generation"]
         EncCol["encode_document()\nColBERT multivector"]
         EncDense["encode_dense()\nvLLM API → auto-dim"]
-        EncSparse["generate_sparse_vector()\nBM25 terms"]
     end
     
     subgraph Storage["Storage"]
@@ -125,8 +112,8 @@ flowchart TD
     
     URL --> Scrape --> Content
     File --> Parse --> Content
-    Content --> EncCol & EncDense & EncSparse
-    EncCol & EncDense & EncSparse --> Upsert
+    Content --> EncCol & EncDense
+    EncCol & EncDense --> Upsert
 ```
 
 ## Docling Integration

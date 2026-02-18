@@ -6,11 +6,11 @@
 
 ## 1. Project Overview
 
-The Qdrant Proxy is a FastAPI-based service providing advanced vector search with **triple-vector hybrid retrieval** (ColBERT + Dense + Sparse) and an FAQ knowledge base. It exposes all capabilities via both REST API and MCP (Model Context Protocol) tools for AI agent integration.
+The Qdrant Proxy is a FastAPI-based service providing advanced vector search with **dual-vector hybrid retrieval** (ColBERT + Dense) and an FAQ knowledge base. It exposes all capabilities via both REST API and MCP (Model Context Protocol) tools for AI agent integration.
 
 ### Core Capabilities
 
-- **Triple-vector hybrid search** — ColBERT multivector (128-dim MaxSim), Qwen3-Embedding dense (1024-dim cosine), BM25 sparse (IDF)
+- **Dual-vector hybrid search** — ColBERT multivector (128-dim MaxSim), Qwen3-Embedding dense (1024-dim cosine)
 - **Document ingestion** — URL scraping and file conversion via native Docling with GPU acceleration
 - **FAQ knowledge base** — Question/answer pairs with multi-source provenance tracking
 - **FAQ / KV store** — Per-collection key-value entries with semantic search

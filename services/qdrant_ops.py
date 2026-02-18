@@ -106,7 +106,6 @@ def ensure_collection(
     Creates a collection with:
     - ColBERT multivector (128-dim, MaxSim)
     - Dense vector (1024-dim default, Cosine)
-    - Sparse vector (BM25)
 
     Args:
         collection_name: Name of the collection to create/verify
@@ -138,9 +137,6 @@ def ensure_collection(
                     size=vector_size,
                     distance=models.Distance.COSINE,
                 ),
-            },
-            sparse_vectors_config={
-                "sparse": models.SparseVectorParams(),
             },
             optimizers_config=models.OptimizersConfigDiff(
                 indexing_threshold=20000,
@@ -204,9 +200,6 @@ def ensure_faq_collection(
                     size=_get_state().dense_vector_size,
                     distance=models.Distance.COSINE,
                 ),
-            },
-            sparse_vectors_config={
-                "sparse": models.SparseVectorParams(),
             },
             optimizers_config=models.OptimizersConfigDiff(
                 indexing_threshold=10000,

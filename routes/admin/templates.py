@@ -16,7 +16,7 @@ from auth import verify_admin_auth
 from config import settings
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
 from qdrant_client import models
-from services.embedding import encode_dense, encode_document, generate_sparse_vector
+from services.embedding import encode_dense, encode_document
 from services.template_learning import (
     _template_doc_id,
     build_domain_template,
@@ -158,7 +158,6 @@ async def reapply_template(
                 scroll_limit=scroll_limit,
                 encode_document_fn=encode_document,
                 encode_dense_fn=encode_dense,
-                generate_sparse_fn=generate_sparse_vector,
             )
             state.maintenance_tasks[task_key] = {
                 "status": "completed",

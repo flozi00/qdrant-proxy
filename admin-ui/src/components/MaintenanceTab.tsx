@@ -33,7 +33,7 @@ export default function MaintenanceTab() {
 function ReembedSection() {
   const { collections } = useApp();
   const [selectedCollection, setSelectedCollection] = useState('');
-  const [vectorTypes, setVectorTypes] = useState({ dense: true, colbert: true, sparse: false });
+  const [vectorTypes, setVectorTypes] = useState({ dense: true, colbert: true });
   const [status, setStatus] = useState('');
   const [tasks, setTasks] = useState<Record<string, MaintenanceTask>>({});
   const [polling, setPolling] = useState(false);
@@ -57,7 +57,7 @@ function ReembedSection() {
     }
   }, [reembedCollections, selectedCollection]);
 
-  const toggleType = (t: 'dense' | 'colbert' | 'sparse') =>
+  const toggleType = (t: 'dense' | 'colbert') =>
     setVectorTypes((v) => ({ ...v, [t]: !v[t] }));
 
   const startReembedding = async () => {
@@ -167,10 +167,10 @@ function ReembedSection() {
       <div className="mb-4 space-y-2">
         <label className="block text-xs font-bold text-blue-800 uppercase">Vector Types to Re-embed:</label>
         <div className="flex gap-4">
-          {(['dense', 'colbert', 'sparse'] as const).map((t) => (
+          {(['dense', 'colbert'] as const).map((t) => (
             <label key={t} className="flex items-center gap-2 cursor-pointer text-sm">
               <input type="checkbox" checked={vectorTypes[t]} onChange={() => toggleType(t)} className="h-4 w-4 text-blue-600" />
-              <span>{t === 'dense' ? 'Dense Vectors' : t === 'colbert' ? 'ColBERT Vectors' : 'Sparse Vectors'}</span>
+              <span>{t === 'dense' ? 'Dense Vectors' : 'ColBERT Vectors'}</span>
             </label>
           ))}
         </div>
@@ -265,7 +265,6 @@ function EmbeddingInfoCard() {
       <ul className="text-sm text-gray-600 space-y-2 list-disc pl-5">
         <li><strong>ColBERT:</strong> <code className="text-xs bg-gray-200 px-1 rounded">{config?.colbert_model_id || '…'}</code> (128-dim)</li>
         <li><strong>Dense:</strong> <code className="text-xs bg-gray-200 px-1 rounded">{config?.dense_model_id || '…'}</code> ({config?.dense_vector_size || '…'}-dim, auto-detected)</li>
-        <li><strong>Sparse:</strong> Custom BM25 tokens</li>
       </ul>
       <p className="text-xs text-gray-400 mt-4">
         Models are configured via environment variables (<code>DENSE_MODEL_NAME</code>, <code>COLBERT_MODEL_NAME</code>, <code>DENSE_EMBEDDING_URL</code>).

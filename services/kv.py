@@ -1,8 +1,8 @@
 """FAQ / Key-Value service for Qdrant Proxy.
 
 Provides CRUD and semantic search for per-collection FAQ (key/value) entries.
-Each collection gets its own Qdrant collection with ColBERT + dense + sparse vectors,
-matching the same triple-vector search pipeline as the main document search.
+Each collection gets its own Qdrant collection with ColBERT + dense vectors,
+matching the same hybrid search pipeline as the main document search.
 """
 
 import logging
@@ -64,12 +64,11 @@ def list_kv_collections() -> List[Dict]:
 
 @linetimer()
 def ensure_kv_collection(collection_name: str) -> str:
-    """Ensure a KV collection exists with ColBERT + dense + sparse vectors.
+    """Ensure a KV collection exists with ColBERT + dense vectors.
 
-    Uses the same triple-vector schema as the main document collections:
+    Uses the same dual-vector schema as the main document collections:
     - ColBERT multivector (128-dim, MaxSim) for precise reranking
     - Dense (Cosine) for semantic retrieval
-    - Sparse (BM25 with IDF) for lexical matching
 
     Returns the Qdrant collection name.
     """
@@ -93,11 +92,6 @@ def ensure_kv_collection(collection_name: str) -> str:
                 "dense": models.VectorParams(
                     size=settings.dense_vector_size,
                     distance=models.Distance.COSINE,
-                ),
-            },
-            sparse_vectors_config={
-                "sparse": models.SparseVectorParams(
-                    modifier=models.Modifier.IDF,
                 ),
             },
             on_disk_payload=False,
@@ -136,7 +130,7 @@ async def upsert_kv(
 
     Returns dict with entry fields.
     """
-    from services.embedding import encode_dense, encode_document, generate_sparse_vector
+    from services.embedding import encode_dense, encode_document
 
     client = _get_qdrant_client()
     kv_col = ensure_kv_collection(collection_name)
@@ -154,11 +148,10 @@ async def upsert_kv(
     except Exception:
         pass
 
-    # Generate all three vector types from key text
+    # Generate vector embeddings from key text
     embed_text = f"Key: {key}\nValue: {value}"
     colbert_vector = await encode_document(embed_text)
     dense_vector = await encode_dense(embed_text)
-    sparse_vector = generate_sparse_vector(embed_text)
 
     payload = {
         "collection_name": collection_name,
@@ -176,7 +169,6 @@ async def upsert_kv(
                 vector={
                     "colbert": colbert_vector,
                     "dense": dense_vector,
-                    "sparse": sparse_vector,
                 },
                 payload=payload,
             )
@@ -267,10 +259,10 @@ async def search_kv(
     limit: int = 5,
     score_threshold: float = 0.7,
 ) -> List[Dict]:
-    """Semantic search over FAQ/KV entries using the triple-vector pipeline.
+    """Semantic search over FAQ/KV entries using the dual-vector pipeline.
 
     Pipeline (matches main document search):
-    1. Prefetch: Dense + Sparse candidates (fast approximate retrieval)
+    1. Prefetch: Dense candidates (fast approximate retrieval)
     2. Rerank: ColBERT MaxSim on prefetched candidates (precise scoring)
 
     Args:
@@ -282,7 +274,7 @@ async def search_kv(
     Returns:
         List of matching KV entries with scores
     """
-    from services.embedding import encode_dense, encode_query, generate_sparse_vector
+    from services.embedding import encode_dense, encode_query
 
     client = _get_qdrant_client()
     kv_col = get_kv_collection_name(collection_name)
@@ -291,30 +283,19 @@ async def search_kv(
         return []
 
     try:
-        # Encode query with all three models
+        # Encode query
         query_colbert = await encode_query(query)
         dense_vector = await encode_dense(query)
-        sparse_vector = generate_sparse_vector(query)
 
         prefetch_limit = max(limit * 10, 50)
 
-        # Two-stage search: dense + sparse prefetch → ColBERT rerank
-        # Uses ColBERT as the final scorer (no DBSF fusion) so that scores
-        # are stable absolute MaxSim values regardless of collection size.
+        # Two-stage search: dense prefetch → ColBERT rerank
         results = client.query_points(
             collection_name=kv_col,
             prefetch=[
                 models.Prefetch(
                     query=dense_vector,
                     using="dense",
-                    limit=prefetch_limit,
-                ),
-                models.Prefetch(
-                    query=models.SparseVector(
-                        indices=sparse_vector.indices,
-                        values=sparse_vector.values,
-                    ),
-                    using="sparse",
                     limit=prefetch_limit,
                 ),
             ],

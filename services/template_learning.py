@@ -262,9 +262,6 @@ async def build_domain_template(
             else:
                 zero_vectors[name] = [0.0] * params.size
 
-        # Sparse vector: empty
-        zero_vectors["sparse"] = models.SparseVector(indices=[], values=[])
-
         qdrant_client.upsert(
             collection_name=collection_name,
             points=[
@@ -584,7 +581,6 @@ async def reapply_domain_template(
     batch_size: int = 8,
     encode_document_fn=None,
     encode_dense_fn=None,
-    generate_sparse_fn=None,
 ) -> Dict[str, Any]:
     """Re-filter existing documents for *domain* using the current template.
 
@@ -595,9 +591,8 @@ async def reapply_domain_template(
     Args:
         encode_document_fn: async (text) -> ColBERT multivector
         encode_dense_fn: async (text) -> dense vector
-        generate_sparse_fn: (text) -> sparse vector
     """
-    if not encode_document_fn or not encode_dense_fn or not generate_sparse_fn:
+    if not encode_document_fn or not encode_dense_fn:
         raise ValueError("Embedding functions are required")
 
     # Load current template
@@ -684,7 +679,6 @@ async def reapply_domain_template(
 
             colbert_vec = await encode_document_fn(filtered)
             dense_vec = await encode_dense_fn(filtered)
-            sparse_vec = generate_sparse_fn(filtered)
 
             # Build updated payload — preserve existing fields
             updated_payload = {
@@ -708,7 +702,6 @@ async def reapply_domain_template(
                         vector={
                             "colbert": colbert_vec,
                             "dense": dense_vec,
-                            "sparse": sparse_vec,
                         },
                     )
                 ],

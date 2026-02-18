@@ -33,7 +33,7 @@ Q: {question}
 A: {answer}
 ```
 
-This simple Q&A format is used as the text that gets embedded (ColBERT + Dense + Sparse vectors) for hybrid search.
+This simple Q&A format is used as the text that gets embedded (ColBERT + Dense vectors) for hybrid search.
 
 ## FAQ ID Generation
 
@@ -89,7 +89,7 @@ The admin UI provides a manual FAQ generation workflow where administrators can 
 ```mermaid
 flowchart TD
     Select["Admin selects text\nin document preview"] --> Generate["POST /admin/documents/generate-faq\n(LLM generates Q&A)"]
-    Generate --> Dedup["Semantic search existing FAQs\n(ColBERT + Dense + Sparse)"]
+    Generate --> Dedup["Semantic search existing FAQs\n(ColBERT + Dense)"]
     Dedup --> Review["Admin reviews generated Q&A\n+ potential duplicates"]
     Review --> Create["Create New FAQ\n(POST /admin/documents/submit-faq)"]
     Review --> Merge["Merge into existing FAQ\n(append source_url only)"]
@@ -156,19 +156,16 @@ When merging, only the `source_url` and `document_id` are appended to the existi
 
 ### KV Collection Schema
 
-KV collections use the same triple-vector schema as the main document collections:
+KV collections use the same dual-vector schema as the main document collections:
 
 ```python
 vectors_config = {
     "colbert": VectorParams(size=128, distance=Cosine, multivector_config=MaxSim),
     "dense": VectorParams(size=1024, distance=Cosine),
 }
-sparse_vectors_config = {
-    "sparse": SparseVectorParams(modifier=IDF),
-}
 ```
 
-**Search pipeline**: Dense + Sparse prefetch → ColBERT MaxSim reranking → DBSF fusion.
+**Search pipeline**: Dense prefetch → ColBERT MaxSim reranking.
 
 ### Admin UI: FAQ / KV Tab
 

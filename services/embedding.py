@@ -1,19 +1,16 @@
-"""Embedding service for ColBERT, Dense, and Sparse vectors.
+"""Embedding service for ColBERT and Dense vectors.
 
 Provides functions for:
 - ColBERT multivector embeddings via OpenAI-compatible vLLM endpoint
 - Dense embeddings via OpenAI-compatible vLLM endpoint
-- Sparse BM25-style vectors with NLP preprocessing
 """
 
 import logging
-import re
-from typing import Any, Dict, List, Optional
+from typing import Any, List, Optional
 
 import httpx
 from config import settings
 from fastapi import HTTPException, status
-from qdrant_client import models
 
 from utils.timings import linetimer
 
@@ -334,126 +331,4 @@ async def encode_dense_batch(texts: List[str], batch_size: int = 8) -> List[List
         )
 
 
-@linetimer()
-def generate_sparse_vector(text: str) -> models.SparseVector:
-    """Generate sparse vector using BM25-style term weighting with NLP preprocessing.
 
-    Pipeline:
-    1. Language detection (auto-detect with English fallback)
-    2. Tokenization with special handling for URLs, emails, numbers
-    3. Stopword removal (language-specific)
-    4. Snowball stemming (language-specific)
-    5. TF-IDF-like scoring with hash-based indexing
-    """
-    try:
-        import nltk
-        from langdetect import LangDetectException, detect
-        from nltk.corpus import stopwords
-        from nltk.stem.snowball import SnowballStemmer
-
-        # Ensure NLTK data is downloaded
-        try:
-            stopwords.words("german")
-        except LookupError:
-            nltk.download("stopwords", quiet=True)
-    except ImportError as e:
-        logger.warning(
-            f"NLP libraries not available, falling back to simple tokenization: {e}"
-        )
-        return _generate_sparse_vector_simple(text)
-
-    # Detect language (default to English)
-    try:
-        lang_code = detect(text[:1000])
-        if lang_code not in ["de", "en"]:
-            lang_code = "en"
-    except (LangDetectException, Exception):
-        lang_code = "en"
-
-    lang_map = {"de": "german", "en": "english"}
-    lang_name = lang_map.get(lang_code, "english")
-
-    # Tokenization with preprocessing
-    text_lower = text.lower()
-
-    # Preserve important patterns
-    url_pattern = r"https?://[^\s]+"
-    text_lower = re.sub(url_pattern, "url_token", text_lower)
-
-    email_pattern = r"\b[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}\b"
-    text_lower = re.sub(email_pattern, "email_token", text_lower)
-
-    number_pattern = r"\b\d+\b"
-    text_lower = re.sub(number_pattern, "number_token", text_lower)
-
-    tokens = re.findall(r"\b\w+\b", text_lower)
-
-    # Filter tokens
-    min_length = 2 if lang_code == "de" else 3
-    tokens = [t for t in tokens if len(t) >= min_length]
-
-    # Remove stopwords
-    try:
-        stop_words = set(stopwords.words(lang_name))
-        special_tokens = {"url_token", "email_token", "number_token"}
-        tokens = [t for t in tokens if t not in stop_words or t in special_tokens]
-    except Exception as e:
-        logger.warning(f"Stopword removal failed: {e}")
-
-    # Stemming
-    try:
-        stemmer = SnowballStemmer(lang_name)
-        special_tokens = {"url_token", "email_token", "number_token"}
-        stemmed_tokens = []
-        for token in tokens:
-            if token in special_tokens:
-                stemmed_tokens.append(token)
-            else:
-                try:
-                    stemmed_tokens.append(stemmer.stem(token))
-                except Exception:
-                    stemmed_tokens.append(token)
-        tokens = stemmed_tokens
-    except Exception as e:
-        logger.warning(f"Stemming failed: {e}")
-
-    # Count term frequencies and compute TF-IDF-like scores
-    return _compute_sparse_vector(tokens)
-
-
-def _generate_sparse_vector_simple(text: str) -> models.SparseVector:
-    """Simple fallback sparse vector generation without NLP."""
-    tokens = re.findall(r"\b\w{3,}\b", text.lower())
-    return _compute_sparse_vector(tokens)
-
-
-def _compute_sparse_vector(tokens: List[str]) -> models.SparseVector:
-    """Compute sparse vector from tokens using TF-IDF-like weighting."""
-    import math
-
-    word_counts: Dict[str, int] = {}
-    for token in tokens:
-        word_counts[token] = word_counts.get(token, 0) + 1
-
-    if not word_counts:
-        return models.SparseVector(indices=[], values=[])
-
-    # Log-normalized TF scores
-    max_count = max(word_counts.values())
-    indices = []
-    values = []
-
-    for word, count in word_counts.items():
-        # Use hash for consistent index mapping
-        idx = hash(word) % (2**31)
-        if idx < 0:
-            idx = -idx
-
-        # Log-normalized TF
-        tf = 1 + math.log(count) if count > 0 else 0
-        tf_norm = tf / (1 + math.log(max_count)) if max_count > 0 else 0
-
-        indices.append(idx)
-        values.append(tf_norm)
-
-    return models.SparseVector(indices=indices, values=values)

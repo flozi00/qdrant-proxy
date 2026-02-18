@@ -3,7 +3,7 @@
 Qdrant Proxy Server
 
 A FastAPI server providing:
-- Triple-vector hybrid search (ColBERT + dense + sparse) over Qdrant
+- Hybrid search (ColBERT + dense) over Qdrant
 - Document indexing with web scraping via Docling
 - FAQ knowledge base with extraction and deduplication
 - MCP (Model Context Protocol) tools for LLM integration
@@ -84,7 +84,6 @@ from services import (
     extract_domain,
     extract_title_from_markdown,
     filter_boilerplate,
-    generate_sparse_vector,
     get_faq_collection_name,
     get_feedback_collection_name,
     load_domain_template,
@@ -326,21 +325,18 @@ async def search_knowledge_base(
     # Encode query vectors
     query_multivector = await encode_query(query)
     query_dense = await encode_dense(query)
-    query_sparse = generate_sparse_vector(query)
-
     # Search for related FAQs first (needed for document boosting)
     faq_collection = get_faq_collection_name(target_collection)
     faqs = await search_faqs(
         query_multivector=query_multivector,
         query_dense=query_dense,
-        query_sparse=query_sparse,
         faq_collection=faq_collection,
         as_dict=True,
     )
 
-    # Hybrid search: Dense + Sparse prefetch, ColBERT rerank
+    # Hybrid search: Dense prefetch, ColBERT rerank
     prefetch_limit = max(limit * 10, 100)
-    prefetch = build_hybrid_prefetch(query_dense, query_sparse, prefetch_limit)
+    prefetch = build_hybrid_prefetch(query_dense, prefetch_limit)
 
     # Boost documents from FAQ source URLs by adding them as extra prefetch
     boosted_doc_ids = set()
@@ -468,13 +464,11 @@ async def web_search(
 
     query_multivector = await encode_query(query)
     query_dense = await encode_dense(query)
-    query_sparse = generate_sparse_vector(query)
     faq_collection = get_faq_collection_name(settings.collection_name)
 
     faqs = await search_faqs(
         query_multivector=query_multivector,
         query_dense=query_dense,
-        query_sparse=query_sparse,
         faq_collection=faq_collection,
         as_dict=True,
     )
@@ -673,7 +667,7 @@ async def search_faq_entries(
 ) -> dict:
     """Search FAQ entries in the knowledge base using hybrid semantic search.
 
-    Uses ColBERT + Dense + Sparse three-staged retrieval for high precision.
+    Uses ColBERT + Dense hybrid retrieval for high precision.
     Use this to find existing FAQ entries before creating new ones (deduplication).
 
     Args:
@@ -698,8 +692,6 @@ async def search_faq_entries(
     try:
         query_colbert = await encode_query(query)
         query_dense = await encode_dense(query)
-        query_sparse = generate_sparse_vector(query)
-
         prefetch_limit = max(limit * 5, 50)
 
         results = qdrant_client.query_points(
@@ -710,14 +702,6 @@ async def search_faq_entries(
                     using="dense",
                     limit=prefetch_limit,
                     params=qdrant_models.SearchParams(hnsw_ef=128),
-                ),
-                qdrant_models.Prefetch(
-                    query=qdrant_models.SparseVector(
-                        indices=query_sparse.indices,
-                        values=query_sparse.values,
-                    ),
-                    using="sparse",
-                    limit=prefetch_limit,
                 ),
             ],
             query=query_colbert,
@@ -897,7 +881,6 @@ async def create_faq_entry(
         # Create new FAQ entry
         colbert_vector = await encode_document(faq_text)
         dense_vector = await encode_dense(faq_text)
-        sparse_vector = generate_sparse_vector(faq_text)
 
         payload = {
             "question": question,
@@ -926,7 +909,6 @@ async def create_faq_entry(
                     vector={
                         "colbert": colbert_vector,
                         "dense": dense_vector,
-                        "sparse": sparse_vector,
                     },
                     payload=payload,
                 )
@@ -1277,7 +1259,7 @@ async def search_faq(
 ) -> dict:
     """Search FAQ / predefined Q&A entries for a customer collection.
 
-    Uses hybrid dense + sparse semantic search to match user questions
+    Uses hybrid dense semantic search to match user questions
     against stored FAQ keys. Returns matching entries with their answers.
 
     Args:
@@ -1451,7 +1433,7 @@ async def health_check(deep: bool = False):
 
     Args:
         deep: If True, performs comprehensive read-only tests:
-              - Embedding generation (ColBERT, Dense, Sparse)
+              - Embedding generation (ColBERT, Dense)
               - Dense search on main collection
               - Hybrid search with ColBERT reranking
               - Graph/facts search (if graph collection exists)
@@ -1498,7 +1480,7 @@ async def health_check(deep: bool = False):
     # Deep health check - comprehensive read-only tests
     test_text = "This is a health check test for embedding generation and search."
 
-    # ==== Test 1: Embedding Generation (ColBERT + Dense + Sparse) ====
+    # ==== Test 1: Embedding Generation (ColBERT + Dense) ====
     # Test 1a: ColBERT embedding generation
     try:
         start_time = time.time()
@@ -1541,27 +1523,6 @@ async def health_check(deep: bool = False):
             **base_status,
         )
 
-    # Test 1c: Sparse vector generation
-    try:
-        start_time = time.time()
-        sparse_vector = generate_sparse_vector(test_text)
-        sparse_time = round(time.time() - start_time, 3)
-
-        base_status["embedding_test"]["sparse_success"] = True
-        base_status["embedding_test"]["sparse_time_seconds"] = sparse_time
-        base_status["embedding_test"]["sparse_indices_count"] = len(
-            sparse_vector.indices
-        )
-    except Exception as e:
-        logger.error(f"Sparse vector test failed: {e}")
-        base_status["embedding_test"]["sparse_success"] = False
-        base_status["embedding_test"]["sparse_error"] = str(e)
-        return HealthResponse(
-            status="unhealthy",
-            error=f"Sparse vector failed: {e}",
-            **base_status,
-        )
-
     # ==== Test 2: Simple Dense Search ====
     if collection_exists:
         try:
@@ -1598,9 +1559,7 @@ async def health_check(deep: bool = False):
             start_time = time.time()
             query_colbert = await encode_query(test_text)
             query_dense = await encode_dense(test_text)
-            query_sparse = generate_sparse_vector(test_text)
-
-            # Full hybrid search: Dense + Sparse prefetch, ColBERT rerank
+            # Full hybrid search: Dense prefetch, ColBERT rerank
             results = qdrant_client.query_points(
                 collection_name=settings.collection_name,
                 prefetch=[
@@ -1610,15 +1569,6 @@ async def health_check(deep: bool = False):
                         using="dense",
                         limit=10,
                         params=models.SearchParams(hnsw_ef=64, exact=False),
-                    ),
-                    # Sparse (BM25) search
-                    models.Prefetch(
-                        query=models.SparseVector(
-                            indices=query_sparse.indices,
-                            values=query_sparse.values,
-                        ),
-                        using="sparse",
-                        limit=10,
                     ),
                 ],
                 # ColBERT MaxSim reranking
@@ -1893,9 +1843,6 @@ async def upsert_document_logic(
     logger.info(f"Generating dense embeddings for {url_str}")
     dense_vector = await encode_dense(content)
 
-    # Generate sparse vector for hybrid search
-    sparse_vector = generate_sparse_vector(content)
-
     # Prepare payload with enriched docling metadata
     payload = {"url": url_str, "content": content, "metadata": metadata or {}}
     # Store raw Docling markdown (before boilerplate filtering) for retroactive template reapplication
@@ -1920,7 +1867,6 @@ async def upsert_document_logic(
                 vector={
                     "colbert": multivector,
                     "dense": dense_vector,
-                    "sparse": sparse_vector,
                 },
                 payload=payload,
             )

@@ -162,7 +162,7 @@ export default function FaqTab() {
         <div>
           <h2 className="text-2xl font-bold text-gray-800">📋 FAQ / Key-Value Manager</h2>
           <p className="text-sm text-gray-500 mt-1">
-            Manage predefined FAQ entries per collection. Entries are matched via triple-vector search.
+            Manage predefined FAQ entries per collection. Entries are matched via hybrid search.
           </p>
         </div>
         <div className="flex items-center gap-3">

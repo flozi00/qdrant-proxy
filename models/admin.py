@@ -77,8 +77,8 @@ class ReembedRequest(BaseModel):
 
     collection_name: Optional[str] = Field(None, description="Collection to re-embed. If None, uses default.")
     vector_types: List[str] = Field(
-        default=["dense", "colbert", "sparse"],
-        description="List of vector types to re-embed: 'dense', 'colbert', and/or 'sparse'",
+        default=["dense", "colbert"],
+        description="List of vector types to re-embed: 'dense' and/or 'colbert'",
     )
 
 

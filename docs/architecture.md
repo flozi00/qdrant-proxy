@@ -13,7 +13,6 @@ flowchart TB
         subgraph Embeddings["Embedding Models"]
             ColBERT["ModernColBERT via vLLM\n(128-dim multivector)"]
             Dense["Qwen3-Embedding via vLLM\n(1024-dim)"]
-            BM25["BM25 Sparse\n(IDF)"]
         end
         
         subgraph Core["Core Functions"]
@@ -51,7 +50,7 @@ services/qdrant-proxy/
 ├── docs/                       # Documentation (this folder)
 │   ├── README.md               # Index & project overview
 │   ├── architecture.md         # Architecture & file tree (this file)
-│   ├── search-pipeline.md      # Triple-vector search strategy
+│   ├── search-pipeline.md      # Dual-vector search strategy
 │   ├── api-reference.md        # REST endpoint documentation
 │   ├── mcp-tools.md            # MCP tool definitions & usage
 │   ├── faq-knowledge-base.md   # FAQ entries, KV store, extraction
@@ -88,7 +87,7 @@ services/qdrant-proxy/
 │   └── admin.py                # Admin-specific models
 ├── services/                   # Business logic services
 │   ├── __init__.py             # Re-exports all services
-│   ├── embedding.py            # ColBERT, Dense, Sparse encoding
+│   ├── embedding.py            # ColBERT, Dense encoding
 │   ├── docling.py              # URL scraping and file conversion
 │   ├── brave_search.py         # Brave Search API + background ingestion
 │   ├── hybrid_search.py        # Shared hybrid search helpers (prefetch + FAQ search)
@@ -121,12 +120,12 @@ services/qdrant-proxy/
 | `state.py` | AppState class holding Qdrant client and models |
 | `auth.py` | `verify_admin_auth()` dependency for admin endpoints |
 | `models/` | All Pydantic request/response models (extracted from app.py) |
-| `services/embedding.py` | `encode_query()`, `encode_document()`, `encode_documents_batch()`, `encode_dense()`, `encode_dense_batch()`, `generate_sparse_vector()` |
+| `services/embedding.py` | `encode_query()`, `encode_document()`, `encode_documents_batch()`, `encode_dense()`, `encode_dense_batch()` |
 | `services/docling.py` | Native Docling integration: `scrape_url_with_docling()` → `DoclingResult`, `convert_file_with_docling()`, `extract_all_hyperlinks()`, `extract_docling_layout()`, `extract_docling_title()` |
 | `services/brave_search.py` | `call_brave_search()`, `process_web_search_results()`, `set_upsert_document_func()` |
 | `services/qdrant_ops.py` | `ensure_collection()`, `ensure_faq_collection()`, `ensure_feedback_collection()`, collection naming helpers |
 | `services/facts.py` | `generate_faq_text()`, `generate_faq_id()`, `build_faq_response_from_payload()`, `url_to_doc_id()`, `transform_scores_for_contrast()`, `extract_title_from_markdown()`, `parse_source_documents()` |
-| `services/hybrid_search.py` | `build_hybrid_prefetch()` (dense+sparse prefetch list), `search_faqs()` (unified FAQ search), `FAQ_MIN_SCORE` constant |
+| `services/hybrid_search.py` | `build_hybrid_prefetch()` (dense prefetch list), `search_faqs()` (unified FAQ search), `FAQ_MIN_SCORE` constant |
 | `services/kv.py` | `ensure_kv_collection()`, `upsert_kv()`, `list_kv()`, `get_kv()`, `delete_kv()`, `search_kv()`, `find_kv_by_key()`, `get_kv_collection_name()` |
 | `services/system_config.py` | Persistent embedding model configuration stored in Qdrant (`system_config` collection) |
 | `services/template_learning.py` | `compute_content_fingerprints()`, `filter_boilerplate()`, `build_domain_template()`, `load_domain_template()`, `preview_domain_template()`, `reapply_domain_template()`, `list_collection_domains()`, `extract_domain()` |

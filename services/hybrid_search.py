@@ -1,15 +1,14 @@
 """Shared hybrid search helpers for Qdrant Proxy.
 
-Provides reusable building blocks for the triple-vector hybrid search pipeline
-(ColBERT + dense + sparse) to avoid code duplication across MCP tools and
-REST API routes.
+Provides reusable building blocks for the dual-vector hybrid search pipeline
+(ColBERT + dense) to avoid code duplication across MCP tools and REST API routes.
 """
 
 import logging
 from typing import Any, Dict, List, Optional
 
 from qdrant_client import QdrantClient, models
-from services.embedding import encode_dense, encode_query, generate_sparse_vector
+from services.embedding import encode_dense, encode_query
 from services.facts import build_faq_response_from_payload
 from state import get_app_state
 
@@ -21,22 +20,20 @@ FAQ_MIN_SCORE = 20.0
 
 def build_hybrid_prefetch(
     query_dense: List[float],
-    query_sparse: models.SparseVector,
     limit: int,
     query_filter: Optional[models.Filter] = None,
     hnsw_ef: int = 128,
 ) -> List[models.Prefetch]:
-    """Build the standard dense + sparse prefetch list for hybrid search.
+    """Build the standard dense prefetch list for hybrid search.
 
     Args:
         query_dense: Dense embedding vector
-        query_sparse: Sparse BM25 vector
         limit: Prefetch candidate limit
         query_filter: Optional Qdrant filter
         hnsw_ef: HNSW ef parameter (higher = more accurate but slower)
 
     Returns:
-        List of two Prefetch objects (dense + sparse)
+        List with one Prefetch object (dense)
     """
     return [
         models.Prefetch(
@@ -50,22 +47,12 @@ def build_hybrid_prefetch(
                 quantization=models.QuantizationSearchParams(rescore=True),
             ),
         ),
-        models.Prefetch(
-            query=models.SparseVector(
-                indices=query_sparse.indices,
-                values=query_sparse.values,
-            ),
-            using="sparse",
-            limit=limit,
-            filter=query_filter,
-        ),
     ]
 
 
 async def search_faqs(
     query_multivector: List[List[float]],
     query_dense: List[float],
-    query_sparse: models.SparseVector,
     faq_collection: str,
     limit: int = 5,
     min_score: float = FAQ_MIN_SCORE,
@@ -74,13 +61,11 @@ async def search_faqs(
 ) -> list:
     """Search for related FAQ entries in a FAQ collection.
 
-    Uses the same hybrid search pattern (dense + sparse prefetch, ColBERT rerank)
-    with consistent parameters.
+    Uses dense prefetch + ColBERT rerank for consistent search.
 
     Args:
         query_multivector: ColBERT multivector query
         query_dense: Dense embedding query
-        query_sparse: Sparse BM25 query
         faq_collection: Name of the FAQ collection to search
         limit: Maximum number of FAQ results
         min_score: Minimum ColBERT MaxSim score threshold
@@ -99,7 +84,6 @@ async def search_faqs(
     try:
         prefetch = build_hybrid_prefetch(
             query_dense=query_dense,
-            query_sparse=query_sparse,
             limit=30,
             query_filter=query_filter,
             hnsw_ef=64,

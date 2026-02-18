@@ -33,7 +33,6 @@ from state import get_app_state
 from services import (
     encode_dense_batch,
     encode_documents_batch,
-    generate_sparse_vector,
 )
 
 router = APIRouter()
@@ -244,11 +243,8 @@ async def rearchive_collection(
             if isinstance(info.config.params.vectors, dict)
             else []
         )
-        has_sparse = info.config.params.sparse_vectors is not None
-
         update_dense = (vector_types is None or "dense" in vector_types) and "dense" in available_vector_names
         update_colbert = (vector_types is None or "colbert" in vector_types) and "colbert" in available_vector_names
-        update_sparse = (vector_types is None or "sparse" in vector_types) and has_sparse
 
         # --- Step 2: Create target collection ---
         _create_migration_collection(source_collection, target_collection)
@@ -301,14 +297,11 @@ async def rearchive_collection(
                 try:
                     dense_embs = None
                     colbert_embs = None
-                    sparse_vecs = None
 
                     if update_dense:
                         dense_embs = await encode_dense_batch(texts, batch_size=batch_size)
                     if update_colbert:
                         colbert_embs = await encode_documents_batch(texts, batch_size=batch_size)
-                    if update_sparse:
-                        sparse_vecs = [generate_sparse_vector(t) for t in texts]
 
                     upsert_points = []
                     for idx, pid in enumerate(point_ids):
@@ -323,8 +316,6 @@ async def rearchive_collection(
                             vectors["dense"] = dense_embs[idx]
                         if colbert_embs:
                             vectors["colbert"] = colbert_embs[idx]
-                        if sparse_vecs:
-                            vectors["sparse"] = sparse_vecs[idx]
 
                         if vectors:
                             upsert_points.append(

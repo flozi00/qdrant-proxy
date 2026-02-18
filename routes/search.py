@@ -1,7 +1,7 @@
 """Search route handlers.
 
 Contains all search-related endpoints:
-- /search - Hybrid ColBERT + dense + sparse semantic search
+- /search - Hybrid ColBERT + dense semantic search
 - /openwebui/search - OpenWebUI-compatible web search
 - /collections/{collection_name}/scroll - Document scrolling
 """
@@ -36,7 +36,6 @@ from services import (
     encode_document,
     encode_query,
     ensure_collection,
-    generate_sparse_vector,
     get_faq_collection_name,
     scrape_url_with_docling,
     transform_scores_for_contrast,
@@ -62,7 +61,7 @@ async def search_documents(search: SearchRequest):
     """Search documents using ColBERT multivector similarity with hybrid retrieval.
 
     Pipeline:
-    1. Prefetch: Dense + Sparse with HNSW (fast approximate search)
+    1. Prefetch: Dense with HNSW (fast approximate search)
     2. Rerank: ColBERT MaxSim on prefetched candidates (precise scoring)
     3. Optional: Time-based boosting with exp_decay formula
     4. Optional: FAQ search with source URL boosting
@@ -125,13 +124,6 @@ async def search_documents(search: SearchRequest):
         enable_boost = boost_config.get("enabled", True)
 
         if search.use_hybrid:
-            # Optimized hybrid search: dense + sparse for prefetch, ColBERT for reranking
-            start_sparse = time.perf_counter()
-            query_sparse = generate_sparse_vector(search.query)
-            logger.info(
-                f"Sparse vector generation took: {time.perf_counter() - start_sparse:.3f}s"
-            )
-
             logger.info(
                 f"Starting hybrid Qdrant query with {search.limit} results..."
             )
@@ -170,15 +162,6 @@ async def search_documents(search: SearchRequest):
                                         ),
                                     ),
                                 ),
-                                models.Prefetch(
-                                    query=models.SparseVector(
-                                        indices=query_sparse.indices,
-                                        values=query_sparse.values,
-                                    ),
-                                    using="sparse",
-                                    limit=prefetch_limit,
-                                    filter=query_filter,
-                                ),
                             ],
                             query=query_multivector,
                             using="colbert",
@@ -213,7 +196,7 @@ async def search_documents(search: SearchRequest):
                 from services.hybrid_search import build_hybrid_prefetch
 
                 prefetch = build_hybrid_prefetch(
-                    query_dense, query_sparse, prefetch_limit, query_filter
+                    query_dense, prefetch_limit, query_filter
                 )
                 results = qdrant_client.query_points(
                     collection_name=target_collection,
@@ -279,7 +262,6 @@ async def search_documents(search: SearchRequest):
             related_faqs = await search_faqs(
                 query_multivector=query_multivector,
                 query_dense=query_dense,
-                query_sparse=query_sparse,
                 faq_collection=faq_collection,
                 query_filter=faq_filter,
             )
@@ -297,7 +279,6 @@ async def search_documents(search: SearchRequest):
                 related_faqs=related_faqs,
                 query_dense=query_dense,
                 query_multivector=query_multivector,
-                query_sparse=query_sparse,
                 query_filter=query_filter,
                 target_collection=target_collection,
                 qdrant_client=qdrant_client,
@@ -344,7 +325,6 @@ async def _boost_with_faq_sources(
     related_faqs: list,
     query_dense,
     query_multivector,
-    query_sparse,
     query_filter,
     target_collection: str,
     qdrant_client,
@@ -412,7 +392,6 @@ async def _boost_with_faq_sources(
 
                     multivector = await encode_document(content)
                     dense_vector = await encode_dense(content)
-                    sparse_vector = generate_sparse_vector(content)
 
                     payload = {
                         "url": missing_url,
@@ -431,7 +410,6 @@ async def _boost_with_faq_sources(
                                 vector={
                                     "colbert": multivector,
                                     "dense": dense_vector,
-                                    "sparse": sparse_vector,
                                 },
                                 payload=payload,
                             )
@@ -469,14 +447,6 @@ async def _boost_with_faq_sources(
                     exact=False,
                     quantization=models.QuantizationSearchParams(rescore=True),
                 ),
-            ),
-            models.Prefetch(
-                query=models.SparseVector(
-                    indices=query_sparse.indices, values=query_sparse.values
-                ),
-                using="sparse",
-                limit=prefetch_limit,
-                filter=query_filter,
             ),
             models.Prefetch(
                 query=query_dense,

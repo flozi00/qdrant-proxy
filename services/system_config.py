@@ -39,7 +39,6 @@ def ensure_config_collection() -> None:
         client.create_collection(
             collection_name=CONFIG_COLLECTION,
             vectors_config={},  # No vectors needed for config
-            sparse_vectors_config={},
         )
         logger.info(f"Created system configuration collection: {CONFIG_COLLECTION}")
     except Exception as e:

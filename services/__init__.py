@@ -1,7 +1,7 @@
 """Services package for Qdrant Proxy business logic.
 
 This package contains isolated service modules:
-- embedding.py: ColBERT, Dense, Sparse vector generation
+- embedding.py: ColBERT and Dense vector generation
 - docling.py: URL scraping and file conversion via Docling
 - brave_search.py: Brave Search API integration
 - qdrant_ops.py: Qdrant collection operations
@@ -27,7 +27,6 @@ from .embedding import (
     encode_document,
     encode_documents_batch,
     encode_query,
-    generate_sparse_vector,
     initialize_models,
 )
 from .facts import (

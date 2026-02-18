@@ -25,7 +25,7 @@ class SearchRequest(BaseModel):
 
     query: str
     limit: int = Field(50, ge=1, le=100, description="Number of results to return")
-    use_hybrid: bool = Field(True, description="Use hybrid search (dense + sparse)")
+    use_hybrid: bool = Field(True, description="Use hybrid search (dense + colbert)")
     score_threshold: Optional[float] = Field(
         None, ge=0.0, le=1.0, description="Minimum score threshold"
     )

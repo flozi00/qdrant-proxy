@@ -28,7 +28,6 @@ from services import (
     encode_dense,
     encode_document,
     encode_query,
-    generate_sparse_vector,
     get_faq_collection_name,
 )
 
@@ -67,7 +66,6 @@ async def admin_list_documents(
         if search:
             query_multivector = await encode_query(search)
             query_dense = await encode_dense(search)
-            query_sparse = generate_sparse_vector(search)
 
             results = qdrant_client.query_points(
                 collection_name=target_collection,
@@ -81,13 +79,6 @@ async def admin_list_documents(
                     models.Prefetch(
                         query=query_dense,
                         using="dense",
-                        limit=limit * 5,
-                    ),
-                    models.Prefetch(
-                        query=models.SparseVector(
-                            indices=query_sparse.indices, values=query_sparse.values
-                        ),
-                        using="sparse",
                         limit=limit * 5,
                     ),
                 ],
@@ -382,7 +373,6 @@ async def admin_generate_faq(
             faq_text = generate_faq_text(question, answer)
             query_colbert = await encode_query(faq_text)
             query_dense = await encode_dense(faq_text)
-            query_sparse = generate_sparse_vector(faq_text)
 
             prefetch_limit = 30
             results = qdrant_client.query_points(
@@ -391,14 +381,6 @@ async def admin_generate_faq(
                     models.Prefetch(
                         query=query_dense,
                         using="dense",
-                        limit=prefetch_limit,
-                    ),
-                    models.Prefetch(
-                        query=models.SparseVector(
-                            indices=query_sparse.indices,
-                            values=query_sparse.values,
-                        ),
-                        using="sparse",
                         limit=prefetch_limit,
                     ),
                 ],
@@ -511,7 +493,6 @@ async def admin_submit_faq(
 
         colbert_vector = await encode_document(faq_text)
         dense_vector = await encode_dense(faq_text)
-        sparse_vector = generate_sparse_vector(faq_text)
 
         payload = {
             "question": body.question,
@@ -540,7 +521,6 @@ async def admin_submit_faq(
                     vector={
                         "colbert": colbert_vector,
                         "dense": dense_vector,
-                        "sparse": sparse_vector,
                     },
                     payload=payload,
                 )
