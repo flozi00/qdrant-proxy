@@ -9,14 +9,19 @@ class DocumentCreate(BaseModel):
     """Request model for creating/updating a document."""
 
     url: str
-    content: Optional[str] = Field(
-        None, description="Optional content override; if not provided, will scrape URL"
-    )
+    content: str = Field(..., description="Document content as markdown")
     metadata: Optional[Dict[str, Any]] = Field(
         default_factory=dict, description="Additional metadata"
     )
     collection_name: Optional[str] = Field(
         None, description="Optional collection name override"
+    )
+    title: Optional[str] = Field(None, description="Document title")
+    hyperlinks: Optional[List[str]] = Field(
+        None, description="Hyperlinks extracted from the document"
+    )
+    docling_layout: Optional[List[Dict[str, Any]]] = Field(
+        None, description="Structural layout from Docling"
     )
 
 
@@ -42,12 +47,6 @@ class SearchRequest(BaseModel):
     )
 
 
-class OpenWebUISearchRequest(BaseModel):
-    """Request model for OpenWebUI-compatible search."""
-
-    query: str
-    count: int = Field(10, ge=1, le=50, description="Number of results to return")
-
 
 class ScrollRequest(BaseModel):
     """Request model for scroll operations."""
@@ -58,9 +57,3 @@ class ScrollRequest(BaseModel):
     order_by: Optional[Dict[str, Any]] = Field(
         None, description="Optional Qdrant order_by payload"
     )
-
-
-class ExternalWebLoaderRequest(BaseModel):
-    """Request model for external web loader endpoint."""
-
-    urls: List[str] = Field(..., description="List of URLs to scrape")

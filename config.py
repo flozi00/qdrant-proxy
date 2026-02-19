@@ -57,9 +57,6 @@ class Settings(BaseSettings):
     # Admin API Configuration
     qdrant_proxy_admin_key: str = Field(default="", alias="QDRANT_PROXY_ADMIN_KEY")
 
-    # Brave Search Configuration
-    brave_api_key: str = Field(default="", alias="BRAVE_SEARCH_API_KEY")
-
     # Server Configuration
     port: int = Field(default=8000, alias="PORT")
     log_level: str = Field(default="warning", alias="LOG_LEVEL")

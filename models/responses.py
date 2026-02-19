@@ -61,14 +61,6 @@ class FAQResponseRef(BaseModel):
 SearchResponse.model_rebuild()
 
 
-class WebSearchResult(BaseModel):
-    """Individual web search result from Brave Search."""
-
-    title: str
-    url: str
-    description: str
-
-
 class ScrollResponse(BaseModel):
     """Response model for scroll operations."""
 
@@ -101,20 +93,3 @@ class HealthResponse(BaseModel):
     collections_test: Optional[Dict[str, Any]] = None
     scroll_test: Optional[Dict[str, Any]] = None
     error: Optional[str] = None
-
-
-class OpenWebUISearchResult(BaseModel):
-    """Individual search result for OpenWebUI."""
-
-    link: str
-    title: str
-    snippet: str
-
-
-class ExternalWebLoaderDocument(BaseModel):
-    """Response model for a single document from external web loader."""
-
-    page_content: str = Field(..., description="Extracted text content from the page")
-    metadata: Dict[str, Any] = Field(
-        default_factory=dict, description="Metadata including source URL and title"
-    )

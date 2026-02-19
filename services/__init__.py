@@ -2,25 +2,10 @@
 
 This package contains isolated service modules:
 - embedding.py: ColBERT and Dense vector generation
-- docling.py: URL scraping and file conversion via Docling
-- brave_search.py: Brave Search API integration
 - qdrant_ops.py: Qdrant collection operations
 - facts.py: FAQ helper functions for content FAQ operations
 """
 
-from .brave_search import (
-    call_brave_search,
-    process_web_search_results,
-    set_upsert_document_func,
-)
-from .docling import (
-    DoclingResult,
-    convert_file_with_docling,
-    extract_all_hyperlinks,
-    extract_docling_layout,
-    extract_docling_title,
-    scrape_url_with_docling,
-)
 from .embedding import (
     encode_dense,
     encode_dense_batch,

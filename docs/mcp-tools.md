@@ -21,9 +21,6 @@ mcp = FastMCP(
 | Tool | Description |
 |------|-------------|
 | `search_knowledge_base` | Hybrid ColBERT+Dense+Sparse search over indexed documents and FAQ entries |
-| `web_search` | Web search via Brave Search API, **auto-indexes all results in background** |
-| `read_url` | Fetch URL content via Docling and **always index to knowledge base** |
-| `upload_document` | Upload a file (base64), convert via Docling, and index it |
 | `delete_document_entry` | Delete a document by URL or ID (optional FAQ cleanup) |
 
 ## FAQ Knowledge Base Tools
@@ -73,59 +70,6 @@ Searches the local knowledge base using triple-vector hybrid retrieval. When FAQ
 - Source URLs from matching FAQs are added as an extra prefetch stage
 - This ensures FAQ-sourced documents appear in results even if they'd otherwise rank lower
 - Boosted documents have `metadata.boosted_by_faqs: true`
-
-### web_search
-
-Performs web search using the Brave Search API. **All search results are automatically scraped and indexed into the knowledge base in the background.**
-
-**Parameters:**
-
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `query` | string | Yes | Search query |
-| `limit` | int | No | Number of results (default: 5, max: 20) |
-| `country` | string | No | Country code (default: US) |
-| `language` | string | No | Language code (default: en) |
-
-**Returns:** List of web results with title, URL, and description, plus related FAQ entries from knowledge base.
-
-**Background Behavior:**
-- Spawns `process_web_search_results()` task to scrape all URLs via Docling
-- Each URL is indexed to the main collection with `source: "web_search"` metadata
-- FAQ extraction is disabled to avoid blocking
-
-### read_url
-
-Fetches a URL and extracts its text content using Docling. **The content is always indexed into the knowledge base.**
-
-**Parameters:**
-
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `url` | string | Yes | URL to fetch and extract |
-
-**Returns:** Object with `title`, `content`, and `indexed` (bool indicating success).
-
-**Behavior:**
-- Content is always stored in the main collection via `upsert_document_logic`
-- If indexing fails, content is still returned with `indexed: false`
-- Metadata includes `source: "mcp_read_url"` to identify MCP-ingested documents
-
-### upload_document
-
-Upload a file (base64), convert it with Docling, and index it into the knowledge base.
-
-**Parameters:**
-
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `filename` | string | Yes | Original file name |
-| `content_base64` | string | Yes | Base64-encoded file bytes |
-| `url` | string | No | Optional URL to store as the document identifier |
-| `metadata` | object | No | Optional metadata dict |
-| `collection_name` | string | No | Target collection (default: main collection) |
-
-**Returns:** Document fields with `success: true` on success. Defaults URL to `custom://<filename>` if not provided. Adds `source: "mcp_upload_document"` to metadata if missing.
 
 ### delete_document_entry
 

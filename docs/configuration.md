@@ -17,7 +17,6 @@ See `.env.example` for a complete reference with descriptions.
 | `OPENAI_API_KEY` | API key for LLM access | — |
 | `MIN_CONTENT_WORDS` | Minimum words to store a document | `32` |
 | `QDRANT_PROXY_ADMIN_KEY` | Admin API auth key | — |
-| `BRAVE_SEARCH_API_KEY` | Brave API key | — |
 | `PORT` | Server port | `8000` |
 | `LOG_LEVEL` | Logging level | `warning` |
 
@@ -43,9 +42,6 @@ fastmcp>=3.0.0b1
 | LiteLLM | LLM inference for picture description API | `http://localhost:4000/v1` |
 | vLLM (Dense) | Dense embedding server (Qwen3-Embedding) | `http://vllm-embedding:9091/v1` |
 | vLLM (ColBERT) | ColBERT multivector embedding server (ModernColBERT) | `http://vllm-colbert:9092` |
-| Brave Search | Web search for OpenWebUI integration | — |
-
-> **Note:** Docling is integrated natively as a Python library (not as an external service). URL scraping and file conversion run in-process with automatic CUDA cache clearing after each conversion.
 
 ## Deployment
 

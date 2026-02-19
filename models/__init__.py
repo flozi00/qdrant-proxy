@@ -19,20 +19,15 @@ from .admin import (
 )
 from .requests import (
     DocumentCreate,
-    ExternalWebLoaderRequest,
-    OpenWebUISearchRequest,
     ScrollRequest,
     SearchRequest,
 )
 from .responses import (
     CollectionResponse,
     DocumentResponse,
-    ExternalWebLoaderDocument,
     FAQResponseRef,
     HealthResponse,
-    OpenWebUISearchResult,
     ScrollResponse,
     SearchResponse,
     SearchResult,
-    WebSearchResult,
 )

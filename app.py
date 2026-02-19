@@ -4,18 +4,19 @@ Qdrant Proxy Server
 
 A FastAPI server providing:
 - Hybrid search (ColBERT + dense) over Qdrant
-- Document indexing with web scraping via Docling
+- Document storage with deduplication, boilerplate filtering, and embeddings
 - FAQ knowledge base with extraction and deduplication
 - MCP (Model Context Protocol) tools for LLM integration
 - FAQ/KV store per collection
 - Admin dashboard with maintenance tools
+
+Content extraction (URL scraping, file conversion, Brave Search) is handled
+by the separate content-proxy service, which calls this service's CRUD API.
 """
 
 import asyncio
-import base64
 import gc
 import hashlib
-import json
 import logging
 import os
 import re
@@ -25,8 +26,6 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional
 from urllib.parse import urlsplit, urlunsplit
 
-import httpx
-
 # Auth utilities
 from auth import verify_admin_auth
 
@@ -35,10 +34,7 @@ from config import settings
 from fastapi import (
     Depends,
     FastAPI,
-    File,
-    Form,
     HTTPException,
-    UploadFile,
     status,
 )
 from fastmcp import FastMCP
@@ -54,15 +50,12 @@ from models import (
     CollectionResponse,
     DocumentCreate,
     DocumentResponse,
-    ExternalWebLoaderDocument,
-    ExternalWebLoaderRequest,
     HealthResponse,
 )
 from qdrant_client import QdrantClient, models
 from routes.admin import router as admin_router
 from routes.kv import router as kv_router
 from routes.search import router as search_router
-from services.brave_search import process_web_search_results, set_upsert_document_func
 from starlette.middleware import Middleware
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
@@ -73,21 +66,17 @@ from state import get_app_state
 
 # Services - business logic functions
 from services import (
-    call_brave_search,
     compute_content_fingerprints,
-    convert_file_with_docling,
     encode_dense,
     encode_document,
     encode_query,
     ensure_collection,
     ensure_feedback_collection,
     extract_domain,
-    extract_title_from_markdown,
     filter_boilerplate,
     get_faq_collection_name,
     get_feedback_collection_name,
     load_domain_template,
-    scrape_url_with_docling,
     url_to_doc_id,
 )
 from utils.timings import linetimer
@@ -193,50 +182,6 @@ def _resolve_document_by_url(
 
 # Silence httpx logs
 logging.getLogger("httpx").setLevel(logging.WARNING)
-
-
-@linetimer()
-async def resolve_url_redirects(url: str, use_head: bool = True) -> Optional[str]:
-    """Resolve final URL after redirects.
-
-    Args:
-        url: URL to resolve
-        use_head: If True, try HEAD request first (faster), fallback to GET if fails
-
-    Returns:
-        Final URL after redirects, or None if failed
-    """
-    try:
-        async with httpx.AsyncClient(
-            timeout=httpx.Timeout(10.0, connect=5.0),
-            verify=True,
-            follow_redirects=True,
-            max_redirects=10,
-        ) as client:
-            # Try HEAD first for efficiency (doesn't download content)
-            if use_head:
-                try:
-                    response = await client.head(url)
-                    if 200 <= response.status_code < 400:
-                        return str(response.url)
-                except Exception:
-                    # HEAD might not be supported, fall through to GET
-                    pass
-
-            # Fallback to GET with streaming (don't download body)
-            async with client.stream("GET", url) as response:
-                if response.status_code >= 400:
-                    logger.debug(f"URL {url} returned status {response.status_code}")
-                    return None
-                final_url = str(response.url)
-                logger.debug(f"Resolved {url} -> {final_url}")
-                return final_url
-    except httpx.TimeoutException:
-        logger.debug(f"Timeout resolving redirects for {url}")
-        return None
-    except Exception as e:
-        logger.debug(f"Failed to resolve redirects for {url}: {e}")
-        return None
 
 
 @asynccontextmanager
@@ -399,190 +344,6 @@ async def search_knowledge_base(
         "faqs": faqs,
         "documents": documents,
     }
-
-
-@mcp.tool
-async def web_search(
-    query: str,
-    limit: int = 5,
-    country: str = "DE",
-    language: str = "de",
-) -> dict:
-    """Search the live web for current information.
-
-    Use this when you need up-to-date information not in the knowledge base,
-    or when the user asks about recent events, news, or external websites.
-
-    Args:
-        query: The search query text
-        limit: Number of results (1-20, default 5)
-        country: Country code (default: DE)
-        language: Language code (default: de)
-    """
-    if not settings.brave_api_key:
-        raise ValueError(
-            "Brave Search API not configured. Set BRAVE_SEARCH_API_KEY environment variable."
-        )
-
-    state = get_app_state()
-    qdrant_client = state.qdrant_client
-
-    limit = max(1, min(20, limit))
-
-    # Call Brave Search API using service function
-    brave_results = await call_brave_search(
-        query=query,
-        country=country,
-        lang=language,
-        limit=limit,
-    )
-
-    # Format results
-    results = [
-        {
-            "title": r.title,
-            "url": r.url,
-            "description": r.description,
-        }
-        for r in brave_results
-    ]
-
-    # Start background task to scrape and index all search results
-    import uuid
-    task_id = f"mcp-web-search-{uuid.uuid4()}"
-    asyncio.create_task(
-        process_web_search_results(
-            results=brave_results,
-            collection_name=settings.collection_name,
-            task_id=task_id,
-        )
-    )
-    logger.info(f"MCP web_search: started background ingestion task {task_id} for {len(brave_results)} URLs")
-
-    # Search for related FAQs in knowledge base
-    from services.hybrid_search import search_faqs
-
-    query_multivector = await encode_query(query)
-    query_dense = await encode_dense(query)
-    faq_collection = get_faq_collection_name(settings.collection_name)
-
-    faqs = await search_faqs(
-        query_multivector=query_multivector,
-        query_dense=query_dense,
-        faq_collection=faq_collection,
-        as_dict=True,
-    )
-
-    return {"faqs": faqs, "results": results}
-
-
-@mcp.tool
-async def read_url(url: str) -> dict:
-    """Read the full content of a specific webpage.
-
-    Use this when you have a specific URL and need its complete content,
-    e.g., from a web search result or user-provided link.
-
-    The content is automatically indexed into the knowledge base for future searches.
-
-    Args:
-        url: The URL to read
-    """
-
-    # Extract title helper
-    def extract_title(content: str, fallback: str) -> str:
-        lines = content.split("\n")
-        for line in lines:
-            line = line.strip()
-            if line.startswith("# "):
-                return line[2:].strip()
-            elif line and not line.startswith("#"):
-                return line[:100]
-        return fallback
-
-    # Use upsert_document_logic to scrape and index content
-    try:
-        result = await upsert_document_logic(
-            url=url,
-            content=None,  # Let it scrape
-            metadata={"source": "mcp_read_url"},
-            collection_name=None,  # Use default collection
-        )
-        content = result.content
-        title = result.title or extract_title(content, url)
-
-        return {
-            "title": title,
-            "content": content,
-            "indexed": True,
-        }
-    except Exception as e:
-        logger.warning(
-            f"Failed to index URL {url}: {e}, returning content only"
-        )
-        # Scrape without indexing as fallback
-        docling_result = await scrape_url_with_docling(url)
-        content = docling_result.content
-        title = docling_result.title or extract_title(content, url)
-
-        return {
-            "title": title,
-            "content": content,
-            "indexed": False,
-        }
-
-
-@mcp.tool
-async def upload_document(
-    filename: str,
-    content_base64: str,
-    url: Optional[str] = None,
-    metadata: Optional[Dict[str, Any]] = None,
-    collection_name: Optional[str] = None,
-) -> dict:
-    """Upload a document file, convert with Docling, and index it.
-
-    Use this when you have a local file (PDF, DOCX, etc.) that should be
-    stored in the same knowledge base as web content.
-
-    Args:
-        filename: Original file name (used for Docling and default URL)
-        content_base64: Base64-encoded file bytes
-        url: Optional URL to store as the document identifier
-        metadata: Optional metadata dict to store alongside the document
-        collection_name: Optional target collection (default: main)
-
-    Returns:
-        Dict with document fields and indexing metadata
-    """
-    if not filename:
-        return {"success": False, "error": "filename is required"}
-
-    try:
-        content = base64.b64decode(content_base64, validate=True)
-    except Exception as e:
-        logger.warning(f"upload_document: invalid base64 content: {e}")
-        return {"success": False, "error": "invalid base64 content"}
-
-    markdown = await convert_file_with_docling(content, filename)
-
-    if not url:
-        url = f"custom://{filename}"
-
-    doc_metadata = dict(metadata or {})
-    doc_metadata.setdefault("source", "mcp_upload_document")
-
-    doc = DocumentCreate(
-        url=url,
-        content=markdown,
-        metadata=doc_metadata,
-        collection_name=collection_name,
-    )
-
-    result = await create_document(doc)
-    response = result.model_dump()
-    response["success"] = True
-    return response
 
 
 @mcp.tool
@@ -1403,7 +1164,7 @@ async def app_lifespan(app):
 
 app = FastAPI(
     title="Qdrant Proxy Server",
-    description="FastAPI proxy for Qdrant with ColBERT embeddings and web scraping",
+    description="FastAPI proxy for Qdrant with ColBERT hybrid search, FAQ knowledge base, and MCP tools. Content extraction is handled by content-proxy.",
     version="2.0.0",
     lifespan=combine_lifespans(app_lifespan, mcp_app.lifespan),
 )
@@ -1690,27 +1451,24 @@ async def health_check(deep: bool = False):
 @linetimer()
 async def upsert_document_logic(
     url: str,
-    content: Optional[str] = None,
+    content: str,
     metadata: Optional[Dict[str, Any]] = None,
     collection_name: Optional[str] = None,
+    title: Optional[str] = None,
+    hyperlinks: Optional[List[str]] = None,
+    docling_layout: Optional[List[Any]] = None,
 ) -> DocumentResponse:
-    """Core logic to create or update a document"""
+    """Core logic to create or update a document."""
     state = get_app_state()
     qdrant_client = state.qdrant_client
 
     url_str = str(url)
 
-    # Resolve redirects to get final URL for deduplication
-    # Only resolve if we're going to scrape (content not provided)
-    if not content:
-        final_url = await resolve_url_redirects(url_str)
-        if final_url and final_url != url_str:
-            logger.info(f"Redirect resolved: {url_str} -> {final_url}")
-            # Store original URL in metadata
-            if metadata is None:
-                metadata = {}
-            metadata["original_url"] = url_str
-            url_str = final_url
+    if not content or not content.strip():
+        raise ValueError("Document content is empty")
+
+    hyperlinks = hyperlinks or []
+    docling_layout = docling_layout or []
 
     doc_id = url_to_doc_id(url_str)
     target_collection = collection_name or settings.collection_name
@@ -1719,23 +1477,6 @@ async def upsert_document_logic(
     ensure_collection(target_collection)
 
     logger.info(f"Creating/updating document for URL: {url_str} in {target_collection}")
-
-    # Get content (scrape if not provided)
-    hyperlinks: list = []
-    docling_layout: list = []
-    title: Optional[str] = None
-    if content:
-        logger.info(f"Using provided content for {url_str}")
-    else:
-        logger.info(f"Scraping URL: {url_str}")
-        docling_result = await scrape_url_with_docling(url_str)
-        content = docling_result.content
-        hyperlinks = docling_result.hyperlinks
-        docling_layout = docling_result.docling_layout
-        title = docling_result.title
-
-    if not content or not content.strip():
-        raise ValueError("Document content is empty")
 
     # Preserve the raw Docling content before any filtering so templates
     # can be reapplied retroactively without re-scraping.
@@ -1890,10 +1631,6 @@ async def upsert_document_logic(
     )
 
 
-# Inject upsert function for background web search ingestion
-set_upsert_document_func(upsert_document_logic)
-
-
 @linetimer()
 @app.post(
     "/documents", response_model=DocumentResponse, status_code=status.HTTP_201_CREATED
@@ -1906,6 +1643,9 @@ async def create_document(doc: DocumentCreate):
             content=doc.content,
             metadata=doc.metadata,
             collection_name=doc.collection_name,
+            title=doc.title,
+            hyperlinks=doc.hyperlinks,
+            docling_layout=doc.docling_layout,
         )
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
@@ -2271,7 +2011,7 @@ async def root():
     return {
         "name": "Qdrant Proxy Server",
         "version": "2.0.0",
-        "description": "FastAPI proxy for Qdrant with ColBERT embeddings, web scraping, and FAQ knowledge base",
+        "description": "FastAPI proxy for Qdrant with ColBERT hybrid search and FAQ knowledge base. Document extraction delegated to content-proxy.",
         "endpoints": {
             "health": "GET /health",
             "create_document": "POST /documents",
@@ -2281,7 +2021,6 @@ async def root():
             "delete_by_url": "DELETE /documents/by-url/{url}",
             "search": "POST /search",
             "deduplicate": "POST /collections/{collection_name}/deduplicate",
-            "document_loader": "PUT /process",
         },
         "faq_endpoints": {
             "create_faq_entry": "POST (via MCP)",
@@ -2290,46 +2029,6 @@ async def root():
             "delete_faq_entry": "DELETE (via MCP)",
         },
     }
-
-
-@linetimer()
-@app.post(
-    "/documents/file",
-    response_model=DocumentResponse,
-    status_code=status.HTTP_201_CREATED,
-)
-async def upload_document_file(
-    file: UploadFile = File(...),
-    collection_name: Optional[str] = Form(None),
-    metadata: Optional[str] = Form(None),
-    url: Optional[str] = Form(None),
-):
-    """Upload and convert a file, then index it"""
-
-    content = await file.read()
-    filename = file.filename
-
-    # Convert
-    markdown = await convert_file_with_docling(content, filename)
-
-    # Create document
-    if not url:
-        url = f"custom://{filename}"
-
-    # Parse metadata
-    meta = {}
-    if metadata:
-        try:
-            meta = json.loads(metadata)
-        except Exception:
-            pass
-
-    # Create doc object
-    doc = DocumentCreate(
-        url=url, content=markdown, metadata=meta, collection_name=collection_name
-    )
-
-    return await create_document(doc)
 
 
 async def periodic_memory_cleanup():
@@ -2466,132 +2165,6 @@ async def submit_feedback(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to store feedback: {str(e)}",
         )
-
-
-@app.put("/process", response_model=List[ExternalWebLoaderDocument])
-async def process_document_loader(
-    request: Request,
-    _: bool = Depends(verify_admin_auth),
-):
-    """External document loader endpoint for Open WebUI integration.
-
-    Accepts raw file binary data and converts it to markdown via Docling.
-    Compatible with Open WebUI's external document loader API.
-
-    Headers:
-    - Authorization: Bearer <QDRANT_PROXY_ADMIN_KEY>
-    - Content-Type: MIME type of the document
-    - X-Filename: URL-encoded original filename
-
-    Configure in Open WebUI:
-    - DOCUMENT_LOADER_ENGINE: external
-    - EXTERNAL_DOCUMENT_LOADER_URL: <qdrant-proxy-url>
-    - EXTERNAL_DOCUMENT_LOADER_API_KEY: <QDRANT_PROXY_ADMIN_KEY>
-    """
-    from urllib.parse import unquote
-
-    file_data = await request.body()
-    if not file_data:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Empty request body",
-        )
-
-    content_type = request.headers.get("content-type", "application/octet-stream")
-    filename = unquote(request.headers.get("x-filename", "document"))
-
-    try:
-        markdown = await convert_file_with_docling(file_data, filename)
-    except Exception as e:
-        logger.error(f"Docling conversion failed for {filename}: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"Document conversion failed: {e}",
-        )
-
-    if not markdown or not markdown.strip():
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail="Document conversion produced empty content",
-        )
-
-    return [
-        ExternalWebLoaderDocument(
-            page_content=markdown,
-            metadata={
-                "source": filename,
-                "content_type": content_type,
-            },
-        )
-    ]
-
-
-@app.post("/external-web-loader", response_model=List[ExternalWebLoaderDocument])
-async def external_web_loader(
-    request: ExternalWebLoaderRequest,
-    _: bool = Depends(verify_admin_auth),
-):
-    """External web loader endpoint for Open WebUI integration.
-
-    This endpoint accepts a list of URLs and returns extracted content in the
-    format expected by Open WebUI's external web loader feature.
-
-    Authentication: Bearer token using QDRANT_PROXY_ADMIN_KEY
-
-    Configure in Open WebUI:
-    - EXTERNAL_WEB_LOADER_URL: <qdrant-proxy-url>/external-web-loader
-    - EXTERNAL_WEB_LOADER_API_KEY: <QDRANT_PROXY_ADMIN_KEY>
-    """
-    results: List[ExternalWebLoaderDocument] = []
-
-    # Process URLs concurrently with semaphore to limit parallelism
-    semaphore = asyncio.Semaphore(5)  # Max 5 concurrent scrapes
-
-    async def scrape_and_index_url(url: str) -> Optional[ExternalWebLoaderDocument]:
-        async with semaphore:
-            try:
-                # Use upsert_document_logic to scrape AND index in one operation
-                result = await upsert_document_logic(
-                    url=url,
-                    content=None,  # Let it scrape
-                    metadata={"source": "external_web_loader"},
-                    collection_name=None,  # Use default collection
-                )
-                content = result.content
-                title = result.title or extract_title_from_markdown(content)
-
-                logger.info(f"Scraped and indexed URL: {url}")
-                return ExternalWebLoaderDocument(
-                    page_content=content,
-                    metadata={
-                        "source": url,
-                        "title": title or url,
-                        "indexed": True,
-                    },
-                )
-            except Exception as e:
-                logger.error(f"Failed to scrape/index URL {url}: {e}")
-                # Return empty document on failure to allow batch to continue
-                return ExternalWebLoaderDocument(
-                    page_content="",
-                    metadata={
-                        "source": url,
-                        "title": url,
-                        "error": str(e),
-                        "indexed": False,
-                    },
-                )
-
-    # Scrape and index all URLs concurrently
-    tasks = [scrape_and_index_url(url) for url in request.urls]
-    scraped_results = await asyncio.gather(*tasks)
-
-    # Filter out None results and collect valid documents
-    for doc in scraped_results:
-        if doc is not None:
-            results.append(doc)
-
-    return results
 
 
 def main():

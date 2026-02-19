@@ -1,19 +1,19 @@
 /* ============================================================================
  * Search Tab — Knowledge Base search, Web search, URL Fetch
  *
- * Three search modes with result display, markdown preview, and feedback.
+ * Four search/ingest modes with result display, markdown preview, and feedback.
  * ============================================================================ */
 
 import { useCallback, useRef, useState } from 'react';
 import { marked } from 'marked';
-import { apiFetch } from '../api/client';
+import { apiFetch, getAdminKey } from '../api/client';
 import { mcpClient } from '../api/mcp';
 import { useApp } from '../store';
-import type { DocumentDetail, FAQEntry, SearchDocument, WebSearchResult } from '../types';
+import type { DocumentDetail, FAQEntry, SearchDocument } from '../types';
 import { urlToDocId } from '../utils';
 import { FAQEntryDisplay, Modal, StarRating } from './ui';
 
-type SearchMode = 'qdrant' | 'web' | 'url';
+type SearchMode = 'qdrant';
 
 /* -------------------------------------------------------------------------- */
 /* Types for FAQ generation                                                   */
@@ -52,8 +52,6 @@ export default function SearchTab() {
             <div className="inline-flex rounded-lg border border-gray-200 bg-gray-50 p-1">
               {([
                 { id: 'qdrant', label: '📚 Knowledge Base', color: 'blue' },
-                { id: 'web', label: '🌐 Web Search', color: 'green' },
-                { id: 'url', label: '🔗 Fetch URL', color: 'purple' },
               ] as const).map((m) => (
                 <button
                   key={m.id}
@@ -71,8 +69,6 @@ export default function SearchTab() {
           </div>
 
           {mode === 'qdrant' && <KnowledgeBaseSearch />}
-          {mode === 'web' && <WebSearchMode />}
-          {mode === 'url' && <UrlFetchMode />}
         </div>
       </div>
     </>
@@ -838,205 +834,3 @@ function DocumentDetailView({
   );
 }
 
-/* -------------------------------------------------------------------------- */
-/* Web Search mode                                                            */
-/* -------------------------------------------------------------------------- */
-
-function WebSearchMode() {
-  const [query, setQuery] = useState('');
-  const [limit, setLimit] = useState(5);
-  const [country, setCountry] = useState('DE');
-  const [lang, setLang] = useState('de');
-  const [loading, setLoading] = useState(false);
-  const [results, setResults] = useState<WebSearchResult[]>([]);
-  const [statusMsg, setStatusMsg] = useState('');
-  const { refreshStats } = useApp();
-
-  const performSearch = async () => {
-    if (!query.trim()) return;
-    setLoading(true);
-    setStatusMsg('');
-    try {
-      const result = await mcpClient.callTool<{ results?: WebSearchResult[] }>('web_search', {
-        query: query.trim(),
-        limit,
-        country,
-        language: lang,
-      });
-      const items = result?.results || [];
-      setResults(items);
-      setStatusMsg(`Found ${items.length} results for "${query.trim()}"`);
-      setQuery('');
-      setTimeout(() => refreshStats(), 5000);
-    } catch (err) {
-      alert('Web search failed: ' + (err instanceof Error ? err.message : err));
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  return (
-    <>
-      <div className="relative mb-4">
-        <input
-          type="text"
-          value={query}
-          onChange={(e) => setQuery(e.target.value)}
-          onKeyDown={(e) => e.key === 'Enter' && performSearch()}
-          className="w-full px-6 py-4 text-lg border-2 border-gray-300 rounded-full focus:border-green-500 focus:outline-none shadow-sm hover:shadow-md transition-shadow"
-          placeholder="Search the web for content to ingest..."
-        />
-        <button
-          onClick={performSearch}
-          disabled={loading}
-          className="absolute right-2 top-1/2 transform -translate-y-1/2 btn-success px-6 py-2 rounded-full"
-        >
-          {loading ? (
-            <span className="flex items-center gap-2">
-              Searching...
-              <span className="loading-spinner" style={{ width: 14, height: 14 }} />
-            </span>
-          ) : (
-            'Search & Ingest'
-          )}
-        </button>
-      </div>
-
-      <div className="flex flex-wrap items-center gap-4 text-sm text-gray-600">
-        <label className="flex items-center gap-2">
-          <input type="number" value={limit} onChange={(e) => setLimit(parseInt(e.target.value) || 5)} min={1} max={20} className="w-16 px-2 py-1 border rounded" />
-          <span>results</span>
-        </label>
-        <span className="text-gray-400">|</span>
-        <label className="flex items-center gap-2">
-          <select value={country} onChange={(e) => setCountry(e.target.value)} className="px-2 py-1 border rounded">
-            {[['DE', 'Germany'], ['US', 'United States'], ['GB', 'United Kingdom'], ['FR', 'France'], ['ES', 'Spain'], ['IT', 'Italy'], ['AT', 'Austria'], ['CH', 'Switzerland']].map(([v, l]) => (
-              <option key={v} value={v}>{l}</option>
-            ))}
-          </select>
-          <span>country</span>
-        </label>
-        <span className="text-gray-400">|</span>
-        <label className="flex items-center gap-2">
-          <select value={lang} onChange={(e) => setLang(e.target.value)} className="px-2 py-1 border rounded">
-            {[['de', 'Deutsch'], ['en', 'English'], ['fr', 'Français'], ['es', 'Español'], ['it', 'Italiano']].map(([v, l]) => (
-              <option key={v} value={v}>{l}</option>
-            ))}
-          </select>
-          <span>language</span>
-        </label>
-      </div>
-
-      {/* Status */}
-      {statusMsg && (
-        <div className="mt-6 bg-green-50 border-l-4 border-green-500 rounded-lg shadow-sm p-6">
-          <h3 className="font-semibold text-green-900 mb-2">Search Complete!</h3>
-          <p className="text-sm text-green-800">{statusMsg}</p>
-          <p className="mt-2 text-xs text-green-700"><strong>Background ingestion in progress...</strong> URLs are being scraped, embedded, and indexed.</p>
-        </div>
-      )}
-
-      {/* Results */}
-      {results.length > 0 && (
-        <div className="mt-6 bg-white rounded-lg shadow-md p-6">
-          <h3 className="text-lg font-semibold text-gray-800 mb-4">Search Results (being ingested)</h3>
-          <div className="space-y-3">
-            {results.map((r, i) => (
-              <div key={i} className="flex items-start gap-3 p-3 bg-gray-50 rounded-lg">
-                <div className="flex-shrink-0 w-8 h-8 bg-green-100 text-green-700 rounded-full flex items-center justify-center font-semibold">{i + 1}</div>
-                <div className="flex-1 min-w-0">
-                  <a href={r.url} target="_blank" rel="noreferrer" className="text-blue-600 hover:underline font-medium truncate block">
-                    {r.title || r.url}
-                  </a>
-                  <p className="text-sm text-gray-600 mt-1 line-clamp-3">{(r.description || '').substring(0, 300)}</p>
-                  <p className="text-xs text-gray-400 mt-1">{r.url}</p>
-                </div>
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
-    </>
-  );
-}
-
-/* -------------------------------------------------------------------------- */
-/* URL Fetch mode                                                             */
-/* -------------------------------------------------------------------------- */
-
-function UrlFetchMode() {
-  const [url, setUrl] = useState('');
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState('');
-  const [success, setSuccess] = useState('');
-  const [content, setContent] = useState('');
-  const { refreshStats } = useApp();
-
-  const fetchUrl = async () => {
-    setError('');
-    setSuccess('');
-    setContent('');
-    if (!url.trim()) {
-      setError('Please enter a URL');
-      return;
-    }
-    try {
-      new URL(url.trim());
-    } catch {
-      setError('Please enter a valid URL');
-      return;
-    }
-
-    setLoading(true);
-    try {
-      const result = await mcpClient.callTool<{ title?: string; indexed?: boolean; content?: string; markdown?: string; text?: string }>('read_url', { url: url.trim() });
-      const title = result?.title ? `Title: ${result.title}` : 'Document fetched.';
-      setSuccess(result?.indexed ? `${title} Indexed into knowledge base.` : `${title} Returned without indexing.`);
-      setContent(result?.content || result?.markdown || result?.text || '');
-      setUrl('');
-      refreshStats();
-    } catch (err) {
-      setError('Error: ' + (err instanceof Error ? err.message : err));
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  return (
-    <>
-      <div className="relative mb-4">
-        <input
-          type="text"
-          value={url}
-          onChange={(e) => setUrl(e.target.value)}
-          onKeyDown={(e) => e.key === 'Enter' && fetchUrl()}
-          className="w-full px-6 py-4 text-lg border-2 border-gray-300 rounded-full focus:border-purple-500 focus:outline-none shadow-sm hover:shadow-md transition-shadow"
-          placeholder="https://example.com/page"
-        />
-        <button
-          onClick={fetchUrl}
-          disabled={loading}
-          className="absolute right-2 top-1/2 transform -translate-y-1/2 px-6 py-2 rounded-full bg-purple-600 text-white hover:bg-purple-700 disabled:opacity-50"
-        >
-          {loading ? (
-            <span className="flex items-center gap-2">
-              Fetching...
-              <span className="loading-spinner" style={{ width: 14, height: 14 }} />
-            </span>
-          ) : (
-            'Fetch & Ingest'
-          )}
-        </button>
-      </div>
-
-      {error && <div className="mt-2 text-red-600 text-sm">{error}</div>}
-      {success && <div className="mt-2 text-green-600 text-sm">{success}</div>}
-      {content && (
-        <details className="mt-4">
-          <summary className="cursor-pointer text-sm text-gray-700">Fetched content</summary>
-          <pre className="mt-2 p-3 bg-gray-50 border rounded-lg text-xs text-gray-700 whitespace-pre-wrap">{content}</pre>
-        </details>
-      )}
-    </>
-  );
-}

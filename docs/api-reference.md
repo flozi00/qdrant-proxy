@@ -12,7 +12,6 @@ All admin endpoints require `Authorization: Bearer <QDRANT_PROXY_ADMIN_KEY>`.
 | `GET` | `/documents/resolve?url=...` | Resolve a document by URL (handles common URL variants) |
 | `DELETE` | `/documents/{doc_id}` | Delete document |
 | `DELETE` | `/documents/by-url/{url}` | Delete document by URL |
-| `POST` | `/documents/file` | Upload and index file |
 
 When a document is missing, `/documents/{doc_id}` and `/documents/by-url/{url}` return `404` so callers can distinguish not-found from server errors.
 
@@ -23,7 +22,7 @@ When a document is missing, `/documents/{doc_id}` and `/documents/by-url/{url}` 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
 | `POST` | `/search` | Hybrid search with filtering |
-| `POST` | `/openwebui/search` | OpenWebUI-compatible search (Brave + ingest) |
+
 
 See [Search Pipeline](search-pipeline.md) for detailed search flow documentation.
 
@@ -69,12 +68,12 @@ The admin UI (`/admin`) is a React + TypeScript SPA built with Vite and Tailwind
 
 **Tabs:**
 
-1. **Search** — Knowledge base search (MCP `search_knowledge_base`), web search (`web_search`), URL fetch (`read_url`) with side-by-side markdown preview and 👍/👎/★ feedback. The preview panel and document detail modal support **text selection → LLM FAQ generation** with duplicate detection and merge capability.
+1. **Search** — Knowledge base search with side-by-side markdown preview and 👍/👎/★ feedback. The preview panel and document detail modal support **text selection → LLM FAQ generation** with duplicate detection and merge capability.
 2. **FAQ / KV** — Collection selector, CRUD interface, semantic search with score threshold, per-result feedback.
 3. **Quality Feedback** — Search feedback stats/recommendations/failure patterns, FAQ quality sub-tab, feedback list with filters, contrastive training data export.
 4. **Maintenance** — Read-only embedding model info, blue-green re-embedding with collection dropdown, template learning (domain analysis, boilerplate preview, build/delete).
 
-Admin UI search modes use MCP tools (`search_knowledge_base`, `web_search`, `read_url`) rather than REST search endpoints. The UI initializes an MCP session and reuses the `mcp-session-id` header for all subsequent tool calls. The MCP client accepts both JSON and SSE responses, then normalizes tool results by preferring `structuredContent` or parsing JSON text payloads.
+Admin UI search uses the MCP tool `search_knowledge_base`. The UI initializes an MCP session and reuses the `mcp-session-id` header for all subsequent tool calls. The MCP client accepts both JSON and SSE responses, then normalizes tool results by preferring `structuredContent` or parsing JSON text payloads.
 
 ## FAQ / KV REST Endpoints
 
@@ -118,48 +117,6 @@ See [Maintenance](maintenance.md) for detailed re-embedding and template documen
 | `POST` | `/admin/feedback/judge` | Trigger LLM quality assessment |
 
 See [Feedback System](feedback-system.md) for detailed feedback documentation.
-
-## External Integration
-
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| `PUT` | `/process` | OpenWebUI external document loader (converts files via Docling) |
-| `POST` | `/external-web-loader` | OpenWebUI external web loader (scrapes AND indexes to Qdrant) |
-
-### Document Loader (`PUT /process`)
-
-Open WebUI can be configured to use this endpoint as an external document loader engine. When a user uploads a document (PDF, DOCX, etc.) in Open WebUI, the file is sent as raw binary data and converted to markdown via Docling.
-
-**Open WebUI Configuration:**
-```
-DOCUMENT_LOADER_ENGINE=external
-EXTERNAL_DOCUMENT_LOADER_URL=http://qdrant-proxy:8002
-EXTERNAL_DOCUMENT_LOADER_API_KEY=<QDRANT_PROXY_ADMIN_KEY>
-```
-
-**Request:**
-- Method: `PUT`
-- Path: `/process`
-- Body: Raw file binary data
-- Headers:
-  - `Authorization: Bearer <QDRANT_PROXY_ADMIN_KEY>`
-  - `Content-Type`: MIME type of the document
-  - `X-Filename`: URL-encoded original filename
-
-**Response:**
-```json
-[
-  {
-    "page_content": "# Document Title\n\nExtracted markdown content...",
-    "metadata": {
-      "source": "document.pdf",
-      "content_type": "application/pdf"
-    }
-  }
-]
-```
-
-Note: This endpoint only converts the file to markdown — it does **not** index the content into Qdrant. Use `/documents/file` or the MCP `upload_document` tool if indexing is also needed.
 
 ## Error Handling
 

@@ -2,24 +2,19 @@
 
 Contains all search-related endpoints:
 - /search - Hybrid ColBERT + dense semantic search
-- /openwebui/search - OpenWebUI-compatible web search
 - /collections/{collection_name}/scroll - Document scrolling
 """
 
-import asyncio
 import logging
 import time
-import uuid
 from datetime import datetime, timezone
 from typing import List, Optional
 
 from config import settings
-from fastapi import APIRouter, BackgroundTasks, Body, Header, HTTPException, status
+from fastapi import APIRouter, Body, HTTPException, status
 from models import (
     DocumentResponse,
     FAQResponseRef,
-    OpenWebUISearchRequest,
-    OpenWebUISearchResult,
     ScrollRequest,
     ScrollResponse,
     SearchRequest,
@@ -27,17 +22,13 @@ from models import (
     SearchResult,
 )
 from qdrant_client import models
-from services.brave_search import call_brave_search, process_web_search_results
 from state import get_app_state
 
 from services import (
-    build_faq_response_from_payload,
     encode_dense,
-    encode_document,
     encode_query,
     ensure_collection,
     get_faq_collection_name,
-    scrape_url_with_docling,
     transform_scores_for_contrast,
     url_to_doc_id,
 )
@@ -370,64 +361,8 @@ async def _boost_with_faq_sources(
             f"Boosted docs in collection: {len(existing_ids)}/{len(boosted_doc_ids)}"
         )
 
-        if missing_doc_ids:
-            logger.info(
-                f"Adding {len(missing_doc_ids)} missing boosted docs to collection just-in-time"
-            )
-            id_to_url = {url_to_doc_id(url): url for url in boosted_urls}
-
-            for missing_id in missing_doc_ids:
-                missing_url = id_to_url.get(missing_id)
-                if not missing_url:
-                    logger.info(f"Could not find URL for doc ID {missing_id}")
-                    continue
-
-                try:
-                    logger.info(f"Fetching and adding: {missing_url}")
-                    content = (await scrape_url_with_docling(missing_url)).content
-
-                    if not content or not content.strip():
-                        logger.warning(f"Empty content for {missing_url}, skipping")
-                        continue
-
-                    multivector = await encode_document(content)
-                    dense_vector = await encode_dense(content)
-
-                    payload = {
-                        "url": missing_url,
-                        "content": content,
-                        "metadata": {
-                            "added_by": "faq_boost_jit",
-                            "title": f"FAQ source: {missing_url}",
-                        },
-                    }
-
-                    qdrant_client.upsert(
-                        collection_name=target_collection,
-                        points=[
-                            models.PointStruct(
-                                id=missing_id,
-                                vector={
-                                    "colbert": multivector,
-                                    "dense": dense_vector,
-                                },
-                                payload=payload,
-                            )
-                        ],
-                    )
-
-                    logger.info(f"Successfully added {missing_url} to collection")
-
-                except Exception as e:
-                    logger.warning(f"Failed to add {missing_url}: {e}")
-                    boosted_doc_ids = [id for id in boosted_doc_ids if id != missing_id]
-
-            logger.info(
-                f"JIT ingestion complete. {len([id for id in boosted_doc_ids if id not in missing_doc_ids])} docs ready for boost"
-            )
-
     except Exception as e:
-        logger.warning(f"Failed to verify/add boosted docs: {e}")
+        logger.warning(f"Failed to verify boosted docs: {e}")
 
     # Build filter for boosted documents
     boost_filter = models.Filter(should=[models.HasIdCondition(has_id=boosted_doc_ids)])
@@ -501,110 +436,6 @@ async def _boost_with_faq_sources(
     logger.info(f"FAQ boost took: {time.perf_counter() - start_boost:.3f}s")
 
     return search_results
-
-
-@linetimer()
-@router.post("/openwebui/search", response_model=List[OpenWebUISearchResult])
-async def openwebui_search(
-    request: OpenWebUISearchRequest,
-    background_tasks: BackgroundTasks,
-    authorization: Optional[str] = Header(None),
-    user_agent: Optional[str] = Header(None),
-):
-    """OpenWebUI-compatible search endpoint using Brave Search.
-
-    1. Performs Brave Search and returns results immediately in OpenWebUI format
-    2. Starts background task to scrape and ingest results into Qdrant
-    """
-    # Optional: Verify admin authentication
-    if settings.qdrant_proxy_admin_key and authorization:
-        if not authorization.startswith("Bearer "):
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Invalid Authorization header format. Expected: Bearer <token>",
-            )
-        token = authorization[7:]
-        if token != settings.qdrant_proxy_admin_key:
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Invalid API key",
-            )
-
-    if not settings.brave_api_key:
-        raise HTTPException(
-            status_code=status.HTTP_501_NOT_IMPLEMENTED,
-            detail="Brave Search API not configured. Set BRAVE_SEARCH_API_KEY environment variable.",
-        )
-
-    logger.info(
-        f"OpenWebUI search request: query='{request.query}', count={request.count}, user_agent={user_agent}"
-    )
-
-    try:
-        # 1. Call Brave Search API
-        brave_results = await call_brave_search(
-            query=request.query,
-            country="US",
-            lang="en",
-            limit=request.count,
-        )
-
-        # 2. Fetch Docling content for first 3 URLs in parallel
-        DOCLING_ENRICH_COUNT = 3
-
-        async def fetch_docling_content(url: str) -> Optional[str]:
-            try:
-                return (await scrape_url_with_docling(url)).content
-            except Exception as e:
-                logger.warning(f"Failed to fetch Docling content for {url}: {e}")
-            return None
-
-        urls_to_enrich = [r.url for r in brave_results[:DOCLING_ENRICH_COUNT]]
-        docling_tasks = [fetch_docling_content(url) for url in urls_to_enrich]
-        docling_contents = await asyncio.gather(*docling_tasks)
-
-        url_to_content = {
-            url: content
-            for url, content in zip(urls_to_enrich, docling_contents)
-            if content
-        }
-        logger.info(
-            f"Enriched {len(url_to_content)}/{len(urls_to_enrich)} URLs with Docling content"
-        )
-
-        # 3. Convert to OpenWebUI format
-        openwebui_results = []
-        for result in brave_results:
-            snippet = url_to_content.get(result.url, result.description)
-            openwebui_results.append(
-                OpenWebUISearchResult(
-                    link=result.url,
-                    title=result.title,
-                    snippet=snippet,
-                )
-            )
-
-        # 4. Start background ingestion task
-        task_id = f"openwebui-search-{uuid.uuid4()}"
-        background_tasks.add_task(
-            process_web_search_results,
-            results=brave_results,
-            collection_name=settings.collection_name,
-            task_id=task_id,
-        )
-
-        logger.info(
-            f"OpenWebUI search returned {len(openwebui_results)} results. "
-            f"Background ingestion task {task_id} started."
-        )
-        return openwebui_results
-
-    except Exception as e:
-        logger.error(f"OpenWebUI search failed: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Search failed: {str(e)}",
-        )
 
 
 @linetimer()
