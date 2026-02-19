@@ -90,8 +90,7 @@ services/qdrant-proxy/
 │   ├── qdrant_ops.py           # Collection ops, feedback collection helpers
 │   ├── facts.py                # FAQ helper utilities
 │   ├── kv.py                   # FAQ / Key-Value CRUD and search
-│   ├── system_config.py        # Persistent model config in Qdrant
-│   └── template_learning.py    # Domain boilerplate template learning
+│   └── system_config.py        # Persistent model config in Qdrant
 ├── routes/                     # API route handlers
 │   ├── __init__.py             # Router aggregation
 │   ├── search.py               # Hybrid search, scroll
@@ -101,8 +100,7 @@ services/qdrant-proxy/
 │       ├── documents.py        # Admin document management
 │       ├── facts.py            # FAQ entry listing
 │       ├── feedback.py         # Search & FAQ quality feedback
-│       ├── maintenance.py      # Re-embedding + model config
-│       └── templates.py        # Domain boilerplate template management
+│       └── maintenance.py      # Re-embedding + model config
 └── knowledge_graph/            # FAQ knowledge base subsystem
     ├── __init__.py             # Package exports
     └── models.py               # Pydantic models for FAQ entries
@@ -122,7 +120,6 @@ services/qdrant-proxy/
 | `services/hybrid_search.py` | `build_hybrid_prefetch()` (dense prefetch list), `search_faqs()` (unified FAQ search), `FAQ_MIN_SCORE` constant |
 | `services/kv.py` | `ensure_kv_collection()`, `upsert_kv()`, `list_kv()`, `get_kv()`, `delete_kv()`, `search_kv()`, `find_kv_by_key()`, `get_kv_collection_name()` |
 | `services/system_config.py` | Persistent embedding model configuration stored in Qdrant (`system_config` collection) |
-| `services/template_learning.py` | `compute_content_fingerprints()`, `filter_boilerplate()`, `build_domain_template()`, `load_domain_template()`, `preview_domain_template()`, `reapply_domain_template()`, `list_collection_domains()`, `extract_domain()` |
 | `knowledge_graph/models.py` | `SourceDocument`, `FAQResponse`, `SearchFeedbackCreate`, `FeedbackResponse`, `FeedbackStatsResponse`, `FeedbackExportResponse` |
 | `routes/search.py` | `/search`, `/collections/{name}/scroll` endpoints |
 | `routes/kv.py` | KV REST endpoints (`/kv/...`) |
@@ -131,7 +128,6 @@ services/qdrant-proxy/
 | `routes/admin/facts.py` | FAQ entry listing |
 | `routes/admin/feedback.py` | Search feedback endpoints |
 | `routes/admin/maintenance.py` | Blue-green re-embedding migration, finalize-migration alias swap, model config |
-| `routes/admin/templates.py` | Domain boilerplate template management |
 
 ## Code Organization
 
@@ -158,5 +154,4 @@ Remaining endpoints in `app.py` (~2k lines):
 | `kv_{collection_name}` | FAQ / Key-Value entries |
 | `{name}_feedback` | Search quality feedback |
 | `{name}_migration_{timestamp}` | Temporary collection during re-embedding |
-| `__domain_template__{domain}` | Domain boilerplate template (special doc in main collection) |
 | `system_config` | Persistent embedding model configuration |

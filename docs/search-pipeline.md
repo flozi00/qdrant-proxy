@@ -157,10 +157,8 @@ In addition to the filtered markdown, the proxy extracts three enriched fields f
 |-------|-------------|
 | `title` | Page title from Docling's structured document — looks for `label="title"` text node in any content layer, falling back to first `section_header` |
 | `hyperlinks` | All hyperlinks from the entire document (all content layers including navigation, headers, footers), resolved to absolute URLs |
-| `docling_layout` | Compact structural skeleton — list of `{label, content_layer, level?, items?, has_link?}` block descriptors for template detection |
-| `content_fingerprints` | MD5-based fingerprints (12-char hex) of each markdown block after normalizing formatting. Used by template learning |
+| `docling_layout` | Compact structural skeleton — list of `{label, content_layer, level?, items?, has_link?}` block descriptors |
 | `content_hash` | SHA-256 hash of normalized markdown content (collapsed whitespace + lowercased). Used to skip duplicate content ingestion |
-| `raw_content` | Original Docling markdown before template filtering. Enables retroactive template reapplication |
 
 ## Minimum Content Threshold
 

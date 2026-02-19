@@ -53,10 +53,7 @@ Document collections ensure payload indexes for `metadata.indexed_at`, `metadata
 | `GET` | `/admin/facts` | List FAQ entries |
 | `POST` | `/admin/gc/documents` | Garbage collect old documents |
 | `POST` | `/admin/gc/facts` | Garbage collect orphaned FAQ entries |
-| `POST` | `/admin/templates/build` | Build boilerplate template for a domain |
-| `GET` | `/admin/templates` | List all domain templates |
-| `GET` | `/admin/templates/{domain}` | Get template for a domain |
-| `DELETE` | `/admin/templates/{domain}` | Delete template for a domain |
+
 
 ### Admin UI (React SPA)
 
@@ -71,7 +68,7 @@ The admin UI (`/admin`) is a React + TypeScript SPA built with Vite and Tailwind
 1. **Search** — Knowledge base search with side-by-side markdown preview and 👍/👎/★ feedback. The preview panel and document detail modal support **text selection → LLM FAQ generation** with duplicate detection and merge capability.
 2. **FAQ / KV** — Collection selector, CRUD interface, semantic search with score threshold, per-result feedback.
 3. **Quality Feedback** — Search feedback stats/recommendations/failure patterns, FAQ quality sub-tab, feedback list with filters, contrastive training data export.
-4. **Maintenance** — Read-only embedding model info, blue-green re-embedding with collection dropdown, template learning (domain analysis, boilerplate preview, build/delete).
+4. **Maintenance** — Read-only embedding model info, blue-green re-embedding with collection dropdown.
 
 Admin UI search uses the MCP tool `search_knowledge_base`. The UI initializes an MCP session and reuses the `mcp-session-id` header for all subsequent tool calls. The MCP client accepts both JSON and SSE responses, then normalizes tool results by preferring `structuredContent` or parsing JSON text payloads.
 
@@ -103,7 +100,7 @@ See [FAQ Knowledge Base](faq-knowledge-base.md) for detailed FAQ/KV documentatio
 | `POST` | `/admin/maintenance/finalize-migration` | Swap alias to new collection after migration |
 | `GET` | `/admin/maintenance/config/models` | Get current embedding model configuration |
 
-See [Maintenance](maintenance.md) for detailed re-embedding and template documentation.
+See [Maintenance](maintenance.md) for detailed re-embedding documentation.
 
 ## Feedback
 

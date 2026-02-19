@@ -49,13 +49,3 @@ from .qdrant_ops import (
     get_faq_collection_name,
     get_feedback_collection_name,
 )
-from .template_learning import (
-    build_domain_template,
-    compute_content_fingerprints,
-    extract_domain,
-    filter_boilerplate,
-    list_collection_domains,
-    load_domain_template,
-    preview_domain_template,
-    reapply_domain_template,
-)

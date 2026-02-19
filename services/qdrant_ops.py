@@ -185,6 +185,8 @@ def ensure_faq_collection(
         ensure_faq_indexes(faq_collection, client)
         return faq_collection
 
+    from state import get_app_state as _get_state
+
     try:
         client.create_collection(
             collection_name=faq_collection,

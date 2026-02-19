@@ -162,37 +162,6 @@ export interface MaintenanceTask {
   error?: string;
 }
 
-// --- Templates ---
-
-export interface TemplateDomain {
-  domain: string;
-  page_count: number;
-}
-
-export interface TemplateInfo {
-  domain: string;
-  page_count: number;
-  fingerprint_count: number;
-  threshold: number;
-}
-
-export interface TemplatePreview {
-  skipped?: boolean;
-  reason?: string;
-  fingerprint_count: number;
-  page_count: number;
-  min_occurrences: number;
-  boilerplate_blocks: string[];
-  samples: TemplateSample[];
-}
-
-export interface TemplateSample {
-  url: string;
-  blocks_removed: number;
-  before: string;
-  after: string;
-}
-
 // --- Tab types ---
 
 export type TabName = 'search' | 'faq' | 'quality' | 'maintenance';

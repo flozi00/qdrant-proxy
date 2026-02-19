@@ -14,7 +14,6 @@ The Qdrant Proxy is a FastAPI-based service providing advanced vector search wit
 - **Document ingestion** — URL scraping and file conversion via native Docling with GPU acceleration
 - **FAQ knowledge base** — Question/answer pairs with multi-source provenance tracking
 - **FAQ / KV store** — Per-collection key-value entries with semantic search
-- **Template learning** — Automated boilerplate detection and filtering per domain
 - **Blue-green re-embedding** — Zero-downtime embedding model migration via Qdrant aliases
 - **Search quality feedback** — Binary + ranked feedback collection with contrastive training data export
 - **Admin UI** — React + Vite SPA with search, FAQ CRUD, quality dashboard, and maintenance tools
@@ -39,6 +38,6 @@ The Qdrant Proxy is a FastAPI-based service providing advanced vector search wit
 | [API Reference](api-reference.md) | REST endpoints for documents, search, collections, admin |
 | [MCP Tools](mcp-tools.md) | Model Context Protocol tools and client usage |
 | [FAQ Knowledge Base](faq-knowledge-base.md) | FAQ entries, KV store, extraction, multi-source tracking |
-| [Maintenance](maintenance.md) | Re-embedding migration, template learning, garbage collection |
+| [Maintenance](maintenance.md) | Re-embedding migration, garbage collection |
 | [Feedback System](feedback-system.md) | Search quality feedback, training data export |
 | [Configuration](configuration.md) | Environment variables, dependencies, deployment |

@@ -12,6 +12,6 @@
 | [API Reference](docs/api-reference.md) | REST endpoints for documents, search, collections, admin |
 | [MCP Tools](docs/mcp-tools.md) | Model Context Protocol tools and client usage |
 | [FAQ Knowledge Base](docs/faq-knowledge-base.md) | FAQ entries, KV store, extraction, multi-source tracking |
-| [Maintenance](docs/maintenance.md) | Re-embedding migration, template learning, garbage collection |
+| [Maintenance](docs/maintenance.md) | Re-embedding migration, garbage collection |
 | [Feedback System](docs/feedback-system.md) | Search quality feedback, training data export |
 | [Configuration](docs/configuration.md) | Environment variables, dependencies, deployment |

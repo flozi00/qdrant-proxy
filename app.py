@@ -4,7 +4,7 @@ Qdrant Proxy Server
 
 A FastAPI server providing:
 - Hybrid search (ColBERT + dense) over Qdrant
-- Document storage with deduplication, boilerplate filtering, and embeddings
+- Document storage with deduplication and embeddings
 - FAQ knowledge base with extraction and deduplication
 - MCP (Model Context Protocol) tools for LLM integration
 - FAQ/KV store per collection
@@ -66,17 +66,13 @@ from state import get_app_state
 
 # Services - business logic functions
 from services import (
-    compute_content_fingerprints,
     encode_dense,
     encode_document,
     encode_query,
     ensure_collection,
     ensure_feedback_collection,
-    extract_domain,
-    filter_boilerplate,
     get_faq_collection_name,
     get_feedback_collection_name,
-    load_domain_template,
     url_to_doc_id,
 )
 from utils.timings import linetimer
@@ -1478,26 +1474,8 @@ async def upsert_document_logic(
 
     logger.info(f"Creating/updating document for URL: {url_str} in {target_collection}")
 
-    # Preserve the raw Docling content before any filtering so templates
-    # can be reapplied retroactively without re-scraping.
-    raw_content = content
-
-    # Template learning: filter boilerplate if a domain template exists
-    domain = extract_domain(url_str)
-    boilerplate_fps = load_domain_template(
-        qdrant_client, target_collection, domain
-    )
-    if boilerplate_fps:
-        original_len = len(content)
-        content = filter_boilerplate(content, boilerplate_fps)
-        if len(content) < original_len:
-            logger.info(
-                f"Template filter removed {original_len - len(content)} chars "
-                f"of boilerplate for {domain}"
-            )
-
     if not content or not content.strip():
-        raise ValueError("Document content is empty after boilerplate filtering")
+        raise ValueError("Document content is empty")
 
     content_hash = _hash_content(content)
     if target_collection == settings.collection_name:
@@ -1573,9 +1551,6 @@ async def upsert_document_logic(
             docling_layout=docling_layout or None,
         )
 
-    # Compute content fingerprints for template learning
-    content_fingerprints = compute_content_fingerprints(content)
-
     # Generate embeddings
     logger.info(f"Generating ColBERT embeddings for {url_str}")
     multivector = await encode_document(content)
@@ -1586,17 +1561,12 @@ async def upsert_document_logic(
 
     # Prepare payload with enriched docling metadata
     payload = {"url": url_str, "content": content, "metadata": metadata or {}}
-    # Store raw Docling markdown (before boilerplate filtering) for retroactive template reapplication
-    if raw_content != content:
-        payload["raw_content"] = raw_content
     if title:
         payload["title"] = title
     if hyperlinks:
         payload["hyperlinks"] = hyperlinks
     if docling_layout:
         payload["docling_layout"] = docling_layout
-    if content_fingerprints:
-        payload["content_fingerprints"] = content_fingerprints
     payload["content_hash"] = content_hash
 
     # Upsert to Qdrant
