@@ -20,9 +20,6 @@ class DocumentCreate(BaseModel):
     hyperlinks: Optional[List[str]] = Field(
         None, description="Hyperlinks extracted from the document"
     )
-    docling_layout: Optional[List[Dict[str, Any]]] = Field(
-        None, description="Structural layout from Docling"
-    )
 
 
 class SearchRequest(BaseModel):

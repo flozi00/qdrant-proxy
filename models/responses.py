@@ -19,9 +19,6 @@ class DocumentResponse(BaseModel):
     hyperlinks: Optional[List[str]] = Field(
         None, description="All hyperlinks extracted from the page (including navigation)"
     )
-    docling_layout: Optional[List[Dict[str, Any]]] = Field(
-        None, description="Structural layout skeleton from Docling document"
-    )
 
 
 class SearchResult(BaseModel):

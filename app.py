@@ -171,7 +171,6 @@ def _resolve_document_by_url(
             vector_count=vector_count,
             title=point.payload.get("title"),
             hyperlinks=point.payload.get("hyperlinks"),
-            docling_layout=point.payload.get("docling_layout"),
         )
 
     return None
@@ -1452,7 +1451,6 @@ async def upsert_document_logic(
     collection_name: Optional[str] = None,
     title: Optional[str] = None,
     hyperlinks: Optional[List[str]] = None,
-    docling_layout: Optional[List[Any]] = None,
 ) -> DocumentResponse:
     """Core logic to create or update a document."""
     state = get_app_state()
@@ -1464,7 +1462,6 @@ async def upsert_document_logic(
         raise ValueError("Document content is empty")
 
     hyperlinks = hyperlinks or []
-    docling_layout = docling_layout or []
 
     doc_id = url_to_doc_id(url_str)
     target_collection = collection_name or settings.collection_name
@@ -1517,7 +1514,6 @@ async def upsert_document_logic(
                     vector_count=0,
                     title=title,
                     hyperlinks=hyperlinks or None,
-                    docling_layout=docling_layout or None,
                 )
         except Exception as e:
             logger.warning(f"Duplicate check failed for {url_str}: {e}")
@@ -1548,7 +1544,6 @@ async def upsert_document_logic(
             vector_count=0,
             title=title,
             hyperlinks=hyperlinks or None,
-            docling_layout=docling_layout or None,
         )
 
     # Generate embeddings
@@ -1565,8 +1560,6 @@ async def upsert_document_logic(
         payload["title"] = title
     if hyperlinks:
         payload["hyperlinks"] = hyperlinks
-    if docling_layout:
-        payload["docling_layout"] = docling_layout
     payload["content_hash"] = content_hash
 
     # Upsert to Qdrant
@@ -1597,7 +1590,6 @@ async def upsert_document_logic(
         vector_count=len(multivector),
         title=title,
         hyperlinks=hyperlinks or None,
-        docling_layout=docling_layout or None,
     )
 
 
@@ -1615,7 +1607,6 @@ async def create_document(doc: DocumentCreate):
             collection_name=doc.collection_name,
             title=doc.title,
             hyperlinks=doc.hyperlinks,
-            docling_layout=doc.docling_layout,
         )
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
@@ -1692,7 +1683,6 @@ async def get_document(doc_id: str, collection_name: Optional[str] = None):
             vector_count=vector_count,
             title=point.payload.get("title"),
             hyperlinks=point.payload.get("hyperlinks"),
-            docling_layout=point.payload.get("docling_layout"),
         )
 
     except HTTPException:

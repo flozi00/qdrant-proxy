@@ -481,7 +481,6 @@ async def scroll_documents(
                     vector_count=0,
                     title=point.payload.get("title"),
                     hyperlinks=point.payload.get("hyperlinks"),
-                    docling_layout=point.payload.get("docling_layout"),
                 )
             )
 
