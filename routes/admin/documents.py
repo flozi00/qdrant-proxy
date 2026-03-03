@@ -21,13 +21,13 @@ logger = logging.getLogger(__name__)
 from models import AdminDocumentItem, AdminDocumentsResponse
 from qdrant_client import models
 from services.facts import generate_faq_id, generate_faq_text, url_to_doc_id
+from services.hybrid_search import encode_hybrid_query, execute_hybrid_search
 from services.qdrant_ops import ensure_faq_collection
 from state import get_app_state
 
 from services import (
     encode_dense,
     encode_document,
-    encode_query,
     get_faq_collection_name,
 )
 
@@ -64,28 +64,16 @@ async def admin_list_documents(
 
         # If search query provided, use semantic search
         if search:
-            query_multivector = await encode_query(search)
-            query_dense = await encode_dense(search)
-
-            results = qdrant_client.query_points(
+            query_multivector, query_dense = await encode_hybrid_query(search)
+            results = execute_hybrid_search(
+                qdrant_client=qdrant_client,
                 collection_name=target_collection,
-                prefetch=[
-                    models.Prefetch(
-                        query=query_multivector,
-                        using="colbert",
-                        limit=limit * 5,
-                        params=models.SearchParams(exact=True),
-                    ),
-                    models.Prefetch(
-                        query=query_dense,
-                        using="dense",
-                        limit=limit * 5,
-                    ),
-                ],
-                query=models.FusionQuery(fusion=models.Fusion.DBSF),
+                query_multivector=query_multivector,
+                query_dense=query_dense,
                 limit=limit,
                 with_payload=True,
-            ).points
+                prefetch_multiplier=5,
+            )
 
             items = []
             for point in results:
@@ -371,24 +359,16 @@ async def admin_generate_faq(
     if qdrant_client.collection_exists(faq_collection):
         try:
             faq_text = generate_faq_text(question, answer)
-            query_colbert = await encode_query(faq_text)
-            query_dense = await encode_dense(faq_text)
-
-            prefetch_limit = 30
-            results = qdrant_client.query_points(
+            query_colbert, query_dense = await encode_hybrid_query(faq_text)
+            results = execute_hybrid_search(
+                qdrant_client=qdrant_client,
                 collection_name=faq_collection,
-                prefetch=[
-                    models.Prefetch(
-                        query=query_dense,
-                        using="dense",
-                        limit=prefetch_limit,
-                    ),
-                ],
-                query=query_colbert,
-                using="colbert",
+                query_multivector=query_colbert,
+                query_dense=query_dense,
                 limit=5,
                 with_payload=True,
-            ).points
+                prefetch_limit=30,
+            )
 
             for point in results:
                 payload = point.payload

@@ -22,11 +22,15 @@ from models import (
     SearchResult,
 )
 from qdrant_client import models
+from services.hybrid_search import (
+    encode_hybrid_query,
+    execute_hybrid_search,
+    normalize_score_threshold_for_mode,
+    search_faqs,
+)
 from state import get_app_state
 
 from services import (
-    encode_dense,
-    encode_query,
     ensure_collection,
     get_faq_collection_name,
     transform_scores_for_contrast,
@@ -38,12 +42,22 @@ logger = logging.getLogger(__name__)
 
 # Create router
 router = APIRouter(tags=["search"])
+_ENSURED_COLLECTIONS: set[str] = set()
 
 
 def get_qdrant_client():
     """Get Qdrant client from app state."""
     state = get_app_state()
     return state.qdrant_client
+
+
+def _ensure_collection_cached(collection_name: str) -> None:
+    """Ensure collection once per process to avoid repeated metadata calls."""
+    if collection_name in _ENSURED_COLLECTIONS:
+        return
+
+    ensure_collection(collection_name)
+    _ENSURED_COLLECTIONS.add(collection_name)
 
 
 @linetimer()
@@ -64,21 +78,14 @@ async def search_documents(search: SearchRequest):
     target_collection = search.collection_name or settings.collection_name
     logger.info(f"Searching for: {search.query} in {target_collection}")
 
-    # Ensure collection exists
-    ensure_collection(target_collection)
+    # Ensure collection exists (cached after first successful check).
+    _ensure_collection_cached(target_collection)
 
-    # Encode query with ColBERT
-    start_colbert = time.perf_counter()
-    query_multivector = await encode_query(search.query)
+    # Encode query once for the universal hybrid pipeline.
+    start_vectors = time.perf_counter()
+    query_multivector, query_dense = await encode_hybrid_query(search.query)
     logger.info(
-        f"ColBERT query encoding took: {time.perf_counter() - start_colbert:.3f}s"
-    )
-
-    # Encode dense query
-    start_dense = time.perf_counter()
-    query_dense = await encode_dense(search.query)
-    logger.info(
-        f"Dense query encoding took: {time.perf_counter() - start_dense:.3f}s"
+        f"Hybrid query encoding took: {time.perf_counter() - start_vectors:.3f}s"
     )
 
     # Build filter - combine custom filter with URL exclusion
@@ -118,7 +125,13 @@ async def search_documents(search: SearchRequest):
             logger.info(
                 f"Starting hybrid Qdrant query with {search.limit} results..."
             )
-            prefetch_limit = max(search.limit * 10, 100)
+
+            if query_multivector is None and enable_boost:
+                # Dense fallback: skip formula prefetch rescoring to keep latency low.
+                logger.info(
+                    "ColBERT unavailable; disabling time-based boost for fast dense-only query"
+                )
+                enable_boost = False
 
             if enable_boost:
                 # Time-based score boosting
@@ -135,79 +148,78 @@ async def search_documents(search: SearchRequest):
                     f"Applying time-based boosting: scale={scale_days}d, midpoint={midpoint}, field={datetime_field}"
                 )
 
-                results = qdrant_client.query_points(
-                    collection_name=target_collection,
-                    prefetch=[
-                        models.Prefetch(
-                            prefetch=[
-                                models.Prefetch(
-                                    query=query_dense,
-                                    using="dense",
-                                    limit=prefetch_limit,
-                                    filter=query_filter,
-                                    params=models.SearchParams(
-                                        hnsw_ef=128,
-                                        exact=False,
-                                        quantization=models.QuantizationSearchParams(
-                                            rescore=True
-                                        ),
+                score_query = models.FormulaQuery(
+                    formula=models.SumExpression(
+                        sum=[
+                            "$score",
+                            models.ExpDecayExpression(
+                                exp_decay=models.DecayParamsExpression(
+                                    x=models.DatetimeKeyExpression(
+                                        datetime_key=datetime_field
                                     ),
-                                ),
-                            ],
-                            query=query_multivector,
-                            using="colbert",
-                            limit=search.limit * 2,
-                        ),
-                    ],
-                    query=models.FormulaQuery(
-                        formula=models.SumExpression(
-                            sum=[
-                                "$score",
-                                models.ExpDecayExpression(
-                                    exp_decay=models.DecayParamsExpression(
-                                        x=models.DatetimeKeyExpression(
-                                            datetime_key=datetime_field
-                                        ),
-                                        target=models.DatetimeExpression(
-                                            datetime=current_time
-                                        ),
-                                        scale=scale_seconds,
-                                        midpoint=midpoint,
-                                    )
-                                ),
-                            ]
-                        ),
-                        defaults={datetime_field: default_date},
+                                    target=models.DatetimeExpression(
+                                        datetime=current_time
+                                    ),
+                                    scale=scale_seconds,
+                                    midpoint=midpoint,
+                                )
+                            ),
+                        ]
                     ),
+                    defaults={datetime_field: default_date},
+                )
+                results = execute_hybrid_search(
+                    qdrant_client=qdrant_client,
+                    collection_name=target_collection,
+                    query_multivector=query_multivector,
+                    query_dense=query_dense,
                     limit=search.limit,
+                    query_filter=query_filter,
                     with_payload=True,
-                ).points
+                    score_query=score_query,
+                    rerank_limit=search.limit * 2,
+                )
             else:
-                # Non-boosted hybrid search
-                from services.hybrid_search import build_hybrid_prefetch
-
-                prefetch = build_hybrid_prefetch(
-                    query_dense, prefetch_limit, query_filter
+                results = execute_hybrid_search(
+                    qdrant_client=qdrant_client,
+                    collection_name=target_collection,
+                    query_multivector=query_multivector,
+                    query_dense=query_dense,
+                    limit=search.limit,
+                    query_filter=query_filter,
+                    with_payload=True,
+                )
+        else:
+            if query_multivector is None:
+                # Late model disabled: run dense-only search.
+                dense_threshold = normalize_score_threshold_for_mode(
+                    search.score_threshold,
+                    colbert_active=False,
                 )
                 results = qdrant_client.query_points(
                     collection_name=target_collection,
-                    prefetch=prefetch,
+                    query=query_dense,
+                    using="dense",
+                    limit=search.limit,
+                    with_payload=True,
+                    score_threshold=dense_threshold,
+                    query_filter=query_filter,
+                ).points
+            else:
+                # Pure ColBERT multivector search
+                colbert_threshold = normalize_score_threshold_for_mode(
+                    search.score_threshold,
+                    colbert_active=True,
+                )
+                results = qdrant_client.query_points(
+                    collection_name=target_collection,
                     query=query_multivector,
                     using="colbert",
                     limit=search.limit,
                     with_payload=True,
+                    score_threshold=colbert_threshold,
+                    filter=query_filter,
                 ).points
-        else:
-            # Pure ColBERT multivector search
-            results = qdrant_client.query_points(
-                collection_name=target_collection,
-                query=query_multivector,
-                using="colbert",
-                limit=search.limit,
-                with_payload=True,
-                score_threshold=search.score_threshold,
-                filter=query_filter,
-            ).points
 
         logger.info(
             f"Qdrant query execution took: {time.perf_counter() - start_qdrant:.3f}s"
@@ -236,8 +248,6 @@ async def search_documents(search: SearchRequest):
         start_faqs = time.perf_counter()
         related_faqs = []
         try:
-            from services.hybrid_search import search_faqs
-
             faq_collection = get_faq_collection_name(target_collection)
             faq_filter = None
             if search.exclude_urls:
@@ -263,7 +273,7 @@ async def search_documents(search: SearchRequest):
         logger.info(f"FAQ search took: {time.perf_counter() - start_faqs:.3f}s")
 
         # BOOST: Re-run search with FAQ sources boosted natively in Qdrant
-        if related_faqs and search.use_hybrid:
+        if related_faqs and search.use_hybrid and query_multivector is not None:
             search_results = await _boost_with_faq_sources(
                 search=search,
                 search_results=search_results,
@@ -348,58 +358,49 @@ async def _boost_with_faq_sources(
     boosted_doc_ids = [url_to_doc_id(url) for url in boosted_urls]
     logger.info(f"Boosted doc IDs: {boosted_doc_ids}")
 
-    # Verify which boosted docs actually exist in the collection
-    try:
-        existing_docs = qdrant_client.retrieve(
-            collection_name=target_collection,
-            ids=boosted_doc_ids,
-            with_payload=False,
-        )
-        existing_ids = [str(doc.id) for doc in existing_docs]
-        missing_doc_ids = set(boosted_doc_ids) - set(existing_ids)
-        logger.info(
-            f"Boosted docs in collection: {len(existing_ids)}/{len(boosted_doc_ids)}"
-        )
-
-    except Exception as e:
-        logger.warning(f"Failed to verify boosted docs: {e}")
+    # Optional debug-only verification to avoid an extra query in normal traffic.
+    if logger.isEnabledFor(logging.DEBUG):
+        try:
+            existing_docs = qdrant_client.retrieve(
+                collection_name=target_collection,
+                ids=boosted_doc_ids,
+                with_payload=False,
+            )
+            existing_ids = [str(doc.id) for doc in existing_docs]
+            logger.debug(
+                "Boosted docs in collection: %d/%d",
+                len(existing_ids),
+                len(boosted_doc_ids),
+            )
+        except Exception as e:
+            logger.debug(f"Failed to verify boosted docs: {e}")
 
     # Build filter for boosted documents
     boost_filter = models.Filter(should=[models.HasIdCondition(has_id=boosted_doc_ids)])
 
-    # Re-run search with boosted docs
-    prefetch_limit = max(search.limit * 10, 100)
-    boosted_results = qdrant_client.query_points(
+    extra_prefetch = [
+        models.Prefetch(
+            query=query_dense,
+            using="dense",
+            limit=len(boosted_doc_ids),
+            filter=boost_filter,
+            params=models.SearchParams(
+                hnsw_ef=64,
+                exact=False,
+                quantization=models.QuantizationSearchParams(rescore=True),
+            ),
+        )
+    ]
+    boosted_results = execute_hybrid_search(
+        qdrant_client=qdrant_client,
         collection_name=target_collection,
-        prefetch=[
-            models.Prefetch(
-                query=query_dense,
-                using="dense",
-                limit=prefetch_limit,
-                filter=query_filter,
-                params=models.SearchParams(
-                    hnsw_ef=128,
-                    exact=False,
-                    quantization=models.QuantizationSearchParams(rescore=True),
-                ),
-            ),
-            models.Prefetch(
-                query=query_dense,
-                using="dense",
-                limit=len(boosted_doc_ids),
-                filter=boost_filter,
-                params=models.SearchParams(
-                    hnsw_ef=64,
-                    exact=False,
-                    quantization=models.QuantizationSearchParams(rescore=True),
-                ),
-            ),
-        ],
-        query=query_multivector,
-        using="colbert",
+        query_multivector=query_multivector,
+        query_dense=query_dense,
         limit=search.limit + len(boosted_doc_ids),
+        query_filter=query_filter,
         with_payload=True,
-    ).points
+        extra_prefetch=extra_prefetch,
+    )
 
     # Replace search results with boosted results
     search_results = []

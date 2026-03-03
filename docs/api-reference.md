@@ -34,7 +34,6 @@ See [Search Pipeline](search-pipeline.md) for detailed search flow documentation
 | `POST` | `/collections/{name}` | Create collection |
 | `DELETE` | `/collections/{name}` | Delete collection |
 | `POST` | `/collections/{name}/scroll` | Scroll through documents |
-| `POST` | `/collections/{name}/deduplicate` | Deduplicate by redirects |
 
 `/collections/{name}/scroll` accepts an optional JSON body with `filter` and `order_by` (payload field sort) to control which documents are returned and how they are ordered.
 

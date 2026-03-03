@@ -54,7 +54,6 @@ class AppState:
         """Check if all critical components are ready."""
         return (
             self.qdrant_client is not None
-            and self.colbert_model is not None
             and self.dense_model is not None
         )
 

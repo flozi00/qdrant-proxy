@@ -23,7 +23,12 @@ from .facts import (
     transform_scores_for_contrast,
     url_to_doc_id,
 )
-from .hybrid_search import FAQ_MIN_SCORE, build_hybrid_prefetch, search_faqs
+from .hybrid_search import (
+    FAQ_MIN_SCORE,
+    encode_hybrid_query,
+    execute_hybrid_search,
+    search_faqs,
+)
 from .kv import (
     delete_kv,
     delete_kv_feedback,

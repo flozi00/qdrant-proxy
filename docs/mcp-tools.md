@@ -20,14 +20,14 @@ mcp = FastMCP(
 
 | Tool | Description |
 |------|-------------|
-| `search_knowledge_base` | Hybrid ColBERT+Dense+Sparse search over indexed documents and FAQ entries |
+| `search_knowledge_base` | Main RAG search over indexed documents + related FAQ entries; supports `allowed_domains` scoping |
 | `delete_document_entry` | Delete a document by URL or ID (optional FAQ cleanup) |
 
 ## FAQ Knowledge Base Tools
 
 | Tool | Description |
 |------|-------------|
-| `search_faq_entries` | Three-stage hybrid search for FAQ entries (Dense+Sparse prefetch → ColBERT rerank) |
+| `search_faq_entries` | Search only extracted FAQ entries in the global FAQ KB; supports `allowed_domains` scoping |
 | `get_faq_entry` | Retrieve a single FAQ entry by its ID |
 | `create_faq_entry` | Create new FAQ entry with deterministic ID (merges if equivalent exists) |
 | `delete_faq_entry` | Delete a FAQ entry by ID |
@@ -39,13 +39,20 @@ mcp = FastMCP(
 
 | Tool | Description |
 |------|-------------|
-| `search_faq` | Triple-vector search (dense+sparse prefetch → ColBERT rerank) over FAQ entries |
+| `search_faq` | Search per-customer KV FAQ entries (`collection_name` required); no URL/domain concept |
 | `list_faq` | List all FAQ entries for a collection |
 | `upsert_faq` | Create or update a FAQ entry |
 | `get_faq` | Retrieve a single FAQ entry by ID |
 | `delete_faq` | Delete a FAQ entry |
 
 All FAQ tools accept `collection_name` at runtime so a single qdrant-proxy instance serves multiple customers.
+
+## Choosing the Right Tool
+
+- Use `search_knowledge_base` for end-user retrieval (documents + related FAQs in one call).
+- Use `search_faq_entries` for FAQ curation workflows (dedup, QA review, source maintenance).
+- Use `search_faq` only for customer-specific KV FAQs in `kv_<collection_name>` collections.
+- `allowed_domains` is available on `search_knowledge_base` and `search_faq_entries` to force lookups to specific website domains and reduce search scope.
 
 ---
 
@@ -62,8 +69,9 @@ Searches the local knowledge base using triple-vector hybrid retrieval. When FAQ
 | `query` | string | Yes | Search query text |
 | `collection_name` | string | No | Collection to search (default: main collection) |
 | `limit` | int | No | Max results (default: 10) |
+| `allowed_domains` | list[string] | No | Restrict search to specific domains (subdomains included), e.g. `["example.com"]` |
 
-**Returns:** Object with `faqs` (list of matching FAQ entries with score) and `documents` (list of search results with URL, content, score, and `metadata.boosted_by_faqs` flag).
+**Returns:** Object with `faqs` (list of matching FAQ entries with score) and `documents` (list of search results with URL, content, score, and `metadata.boosted_by_faqs` flag). When `allowed_domains` is provided, response includes `applied_allowed_domains`.
 
 **FAQ Boost Behavior:**
 - FAQ entries are searched first using the same hybrid pipeline
@@ -82,7 +90,7 @@ Delete a document entry by URL or ID. Optionally cleans up all FAQ entries that 
 | `doc_id` | string | No | Document ID to delete |
 | `url` | string | No | URL to resolve and delete |
 | `collection_name` | string | No | Target collection (default: main collection) |
-| `remove_facts` | bool | No | Remove URL from all FAQ entries (default: true) |
+| `remove_faqs` | bool | No | Remove URL from all FAQ entries (default: true) |
 
 **Returns:** Success status with `deleted_id`, `url`, and optional FAQ cleanup counts.
 
@@ -96,8 +104,9 @@ Searches the FAQ knowledge base using three-stage hybrid retrieval.
 |-----------|------|----------|-------------|
 | `query` | string | Yes | Search query text |
 | `limit` | int | No | Max results (default: 10) |
+| `allowed_domains` | list[string] | No | Restrict to FAQ entries sourced from specific domains |
 
-**Returns:** List of FAQ entries with score, question, answer, and source documents.
+**Returns:** List of FAQ entries with score, question, answer, and source documents. When `allowed_domains` is provided, response includes `applied_allowed_domains`.
 
 **Search Pipeline:**
 1. Dense + Sparse prefetch (fast HNSW + inverted index)

@@ -6,11 +6,14 @@ Provides functions for:
 """
 
 import logging
+import time
 from typing import Any, List, Optional
 
 import httpx
 from config import settings
 from fastapi import HTTPException, status
+from starlette.concurrency import run_in_threadpool
+from state import get_app_state
 
 from utils.timings import linetimer
 
@@ -27,6 +30,117 @@ _MAX_TEXT_CHARS = 20000
 # Module-level client references (set by initialize_models)
 _colbert_client: Optional[httpx.AsyncClient] = None
 _dense_client: Optional[Any] = None  # OpenAI client for dense embeddings
+_colbert_available_cache: Optional[bool] = None
+_colbert_last_checked_at: float = 0.0
+_COLBERT_AVAILABLE_TTL_SECONDS = 20.0
+_COLBERT_UNAVAILABLE_TTL_SECONDS = 300.0
+_COLBERT_HEALTHCHECK_TIMEOUT = httpx.Timeout(1.0, connect=0.25)
+
+
+def is_late_model_enabled() -> bool:
+    """Whether ColBERT late-interaction endpoint is configured."""
+    return settings.colbert_endpoint_configured
+
+
+async def is_colbert_endpoint_available(force_check: bool = False) -> bool:
+    """Check whether the configured ColBERT endpoint is reachable.
+
+    Uses asymmetric cache TTL:
+    - short when available (quick recovery if it fails)
+    - long when unavailable (avoid repeated slow retries)
+    """
+    global _colbert_available_cache, _colbert_last_checked_at
+
+    if not is_late_model_enabled() or _colbert_client is None:
+        _colbert_available_cache = False
+        _colbert_last_checked_at = time.monotonic()
+        return False
+
+    now = time.monotonic()
+    cache_ttl = (
+        _COLBERT_AVAILABLE_TTL_SECONDS
+        if _colbert_available_cache
+        else _COLBERT_UNAVAILABLE_TTL_SECONDS
+    )
+    if (
+        not force_check
+        and _colbert_available_cache is not None
+        and (now - _colbert_last_checked_at) < cache_ttl
+    ):
+        return _colbert_available_cache
+
+    available = False
+
+    # Lightweight readiness check with an aggressive timeout.
+    try:
+        models_response = await _colbert_client.get(
+            "/models",
+            timeout=_COLBERT_HEALTHCHECK_TIMEOUT,
+        )
+        models_response.raise_for_status()
+        available = True
+    except Exception as exc:
+        logger.warning(
+            "ColBERT endpoint is currently unavailable; falling back to dense-only search: %s",
+            exc,
+        )
+
+    _colbert_available_cache = available
+    _colbert_last_checked_at = now
+    return available
+
+
+def _placeholder_colbert_vector() -> List[List[float]]:
+    """Fallback ColBERT placeholder when late model is disabled."""
+    dim = get_app_state().colbert_vector_size or _COLBERT_DIM
+    return [[0.0] * dim]
+
+
+def get_placeholder_colbert_vector() -> List[List[float]]:
+    """Return a schema-compatible ColBERT placeholder multivector.
+
+    Use this when a document must keep the named-vector schema but ColBERT
+    embeddings are unavailable.
+    """
+    return _placeholder_colbert_vector()
+
+
+def _current_model_ids() -> tuple[str, str]:
+    """Return active dense/ColBERT model IDs from in-memory app state."""
+    state = get_app_state()
+    dense_model_id = state.dense_model_id or settings.dense_model_name
+    colbert_model_id = state.colbert_model_id or settings.colbert_model_name
+    return dense_model_id, colbert_model_id
+
+
+def _error_text(exc: Exception) -> str:
+    """Return a non-empty error message for logs/HTTP details."""
+    msg = str(exc).strip()
+    return msg if msg else repr(exc)
+
+
+def _is_colbert_unavailable_error(exc: Exception) -> bool:
+    """Return True when failure indicates temporary ColBERT endpoint unavailability."""
+    if isinstance(
+        exc,
+        (
+            httpx.ConnectTimeout,
+            httpx.ReadTimeout,
+            httpx.WriteTimeout,
+            httpx.PoolTimeout,
+            httpx.ConnectError,
+            httpx.NetworkError,
+            httpx.RemoteProtocolError,
+        ),
+    ):
+        return True
+
+    if isinstance(exc, httpx.HTTPStatusError):
+        status_code = exc.response.status_code if exc.response is not None else None
+        if status_code is not None and status_code >= 500:
+            return True
+
+    return False
 
 
 def get_dense_client() -> Any:
@@ -63,7 +177,7 @@ def initialize_models() -> None:
     Both models are served externally via vLLM and accessed through
     OpenAI-compatible HTTP APIs.
     """
-    global _colbert_client, _dense_client
+    global _colbert_client, _dense_client, _colbert_available_cache, _colbert_last_checked_at
     from services.system_config import get_model_config
     from state import get_app_state
 
@@ -72,16 +186,26 @@ def initialize_models() -> None:
         model_config = get_model_config()
         logger.info(f"Using model configuration: {model_config}")
 
-        # Initialize httpx client for ColBERT embeddings via vLLM
-        logger.info(
-            f"Connecting to ColBERT embedding server at {settings.colbert_embedding_url} "
-            f"(model: {model_config.colbert_model_id})"
-        )
-        _colbert_client = httpx.AsyncClient(
-            base_url=settings.colbert_embedding_url,
-            timeout=httpx.Timeout(120.0, connect=10.0),
-        )
-        logger.info("ColBERT embedding client initialized")
+        # Initialize ColBERT only when an endpoint is configured.
+        if is_late_model_enabled():
+            logger.info(
+                f"Connecting to ColBERT embedding server at {settings.colbert_embedding_url} "
+                f"(model: {model_config.colbert_model_id})"
+            )
+            _colbert_client = httpx.AsyncClient(
+                base_url=settings.colbert_embedding_url,
+                timeout=httpx.Timeout(120.0, connect=10.0),
+            )
+            _colbert_available_cache = None
+            _colbert_last_checked_at = 0.0
+            logger.info("ColBERT embedding client initialized")
+        else:
+            _colbert_client = None
+            _colbert_available_cache = False
+            _colbert_last_checked_at = time.monotonic()
+            logger.info(
+                "COLBERT_EMBEDDING_URL not configured; late model disabled and placeholder vectors enabled"
+            )
 
         # Initialize OpenAI client for dense embeddings via vLLM
         from openai import OpenAI
@@ -111,52 +235,61 @@ def initialize_models() -> None:
                 f"Failed to probe dense embedding dimension, using fallback {detected_dim}: {e}"
             )
 
-        # ColBERT dimension (auto-detect from probe)
+        # ColBERT dimension (auto-detect from probe when enabled)
         colbert_dim = _COLBERT_DIM
-        try:
-            import asyncio
-
-            async def _probe_colbert():
-                resp = await _colbert_client.post(
-                    "/pooling",
-                    json={
-                        "input": "dimension probe",
-                        "model": model_config.colbert_model_id,
-                        "task": "token_embed",
-                    },
-                )
-                resp.raise_for_status()
-                data = resp.json()
-                emb = data["data"][0]["data"]
-                if isinstance(emb[0], list):
-                    return len(emb[0])
-                # Infer from total length (assume at least 1 token)
-                return _COLBERT_DIM
-
-            try:
-                loop = asyncio.get_running_loop()
-            except RuntimeError:
-                loop = None
-
-            if loop and loop.is_running():
-                # We're in an async context already, can't use asyncio.run
-                # Probe will happen on first actual call
-                logger.info(
-                    f"Using default ColBERT dimension: {colbert_dim} (async probe deferred)"
-                )
-            else:
-                colbert_dim = asyncio.run(_probe_colbert())
-                logger.info(f"Detected ColBERT embedding dimension: {colbert_dim}")
-        except Exception as e:
-            logger.warning(
-                f"Failed to probe ColBERT dimension, using default {colbert_dim}: {e}"
+        if _colbert_client is None:
+            logger.info(
+                f"Using default ColBERT dimension: {colbert_dim} (late model disabled)"
             )
+        else:
+            try:
+                import asyncio
+
+                async def _probe_colbert():
+                    resp = await _colbert_client.post(
+                        "/pooling",
+                        json={
+                            "input": "dimension probe",
+                            "model": model_config.colbert_model_id,
+                            "task": "token_embed",
+                        },
+                    )
+                    resp.raise_for_status()
+                    data = resp.json()
+                    emb = data["data"][0]["data"]
+                    if isinstance(emb[0], list):
+                        return len(emb[0])
+                    # Infer from total length (assume at least 1 token)
+                    return _COLBERT_DIM
+
+                try:
+                    loop = asyncio.get_running_loop()
+                except RuntimeError:
+                    loop = None
+
+                if loop and loop.is_running():
+                    # We're in an async context already, can't use asyncio.run
+                    # Probe will happen on first actual call
+                    logger.info(
+                        f"Using default ColBERT dimension: {colbert_dim} (async probe deferred)"
+                    )
+                else:
+                    colbert_dim = asyncio.run(_probe_colbert())
+                    logger.info(f"Detected ColBERT embedding dimension: {colbert_dim}")
+            except Exception as e:
+                logger.warning(
+                    f"Failed to probe ColBERT dimension, using default {colbert_dim}: {e}"
+                )
 
         # Update AppState with client references, IDs, and detected dimensions
         state = get_app_state()
         state.colbert_model = _colbert_client
         state.dense_model = _dense_client
-        state.colbert_model_id = model_config.colbert_model_id
+        state.colbert_model_id = (
+            model_config.colbert_model_id
+            if _colbert_client is not None
+            else "placeholder-disabled"
+        )
         state.dense_model_id = model_config.dense_model_id
         state.dense_vector_size = detected_dim
         state.colbert_vector_size = colbert_dim
@@ -178,10 +311,10 @@ async def _call_colbert_api(
     Returns:
         List of multivector embeddings (one per input text)
     """
-    from services.system_config import get_model_config
-
     if _colbert_client is None:
-        raise RuntimeError("ColBERT embedding client not initialized")
+        return [_placeholder_colbert_vector() for _ in texts]
+
+    _, colbert_model_id = _current_model_ids()
 
     prefix = "[Q] " if is_query else "[D] "
     prefixed_texts = [f"{prefix}{t[:_MAX_TEXT_CHARS]}" for t in texts]
@@ -190,7 +323,7 @@ async def _call_colbert_api(
         "/pooling",
         json={
             "input": prefixed_texts,
-            "model": get_model_config().colbert_model_id,
+            "model": colbert_model_id,
             "task": "token_embed",
         },
     )
@@ -212,10 +345,17 @@ async def encode_document(text: str) -> List[List[float]]:
         results = await _call_colbert_api([text], is_query=False)
         return results[0]
     except Exception as e:
-        logger.error(f"Failed to encode document: {e}")
+        err = _error_text(e)
+        if _is_colbert_unavailable_error(e):
+            logger.warning(
+                "ColBERT endpoint unavailable during document encoding; using placeholder vector: %s",
+                err,
+            )
+            return _placeholder_colbert_vector()
+        logger.error(f"Failed to encode document: {err}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to encode document: {str(e)}",
+            detail=f"Failed to encode document: {err}",
         )
 
 
@@ -243,10 +383,17 @@ async def encode_documents_batch(
             all_results.extend(batch_results)
         return all_results
     except Exception as e:
-        logger.error(f"Failed to batch encode documents: {e}")
+        err = _error_text(e)
+        if _is_colbert_unavailable_error(e):
+            logger.warning(
+                "ColBERT endpoint unavailable during batch document encoding; using placeholder vectors: %s",
+                err,
+            )
+            return [_placeholder_colbert_vector() for _ in texts]
+        logger.error(f"Failed to batch encode documents: {err}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to batch encode documents: {str(e)}",
+            detail=f"Failed to batch encode documents: {err}",
         )
 
 
@@ -257,10 +404,11 @@ async def encode_query(text: str) -> List[List[float]]:
         results = await _call_colbert_api([text], is_query=True)
         return results[0]
     except Exception as e:
-        logger.error(f"Failed to encode query: {e}")
+        err = _error_text(e)
+        logger.error(f"Failed to encode query: {err}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to encode query: {str(e)}",
+            detail=f"Failed to encode query: {err}",
         )
 
 
@@ -268,17 +416,14 @@ async def encode_query(text: str) -> List[List[float]]:
 async def encode_dense(text: str) -> List[float]:
     """Generate dense embedding via OpenAI-compatible vLLM endpoint."""
     client = get_dense_client()
-    from services.system_config import get_model_config
-
     try:
         text_truncated = text[:_MAX_TEXT_CHARS]
-
-        from starlette.concurrency import run_in_threadpool
+        dense_model_id, _ = _current_model_ids()
 
         def _call_api():
             response = client.embeddings.create(
                 input=text_truncated,
-                model=get_model_config().dense_model_id,
+                model=dense_model_id,
             )
             return response.data[0].embedding
 
@@ -307,17 +452,14 @@ async def encode_dense_batch(texts: List[str], batch_size: int = 8) -> List[List
         return []
     
     client = get_dense_client()
-    from services.system_config import get_model_config
-
     try:
         texts_truncated = [t[:_MAX_TEXT_CHARS] for t in texts]
-
-        from starlette.concurrency import run_in_threadpool
+        dense_model_id, _ = _current_model_ids()
 
         def _call_api_batch():
             response = client.embeddings.create(
                 input=texts_truncated,
-                model=get_model_config().dense_model_id,
+                model=dense_model_id,
             )
             return [item.embedding for item in response.data]
 

@@ -8,6 +8,22 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useState, t
 import { apiFetch, setAdminKey, validateKey } from './api/client';
 import type { AdminStats, CollectionInfo } from './types';
 
+function collectionId(collection: CollectionInfo): string {
+  return collection.alias || collection.name;
+}
+
+function isPrimarySearchCollection(collection: CollectionInfo): boolean {
+  const id = collectionId(collection);
+
+  // Keep search/quality scoped to main document collections, not KV/FAQ/feedback/system buckets.
+  if (!id || id.startsWith('kv_')) return false;
+  if (id.endsWith('_faq') || id.endsWith('_feedback')) return false;
+  if (id === 'system_config' || id.startsWith('__')) return false;
+  if (id.includes('_migration_')) return false;
+
+  return collection.type === 'documents';
+}
+
 interface AppState {
   adminKey: string;
   isLoggedIn: boolean;
@@ -42,11 +58,11 @@ export function AppProvider({ children }: { children: ReactNode }) {
       setTotalFaqs(data.total_faqs);
 
       // Auto-select collection if none selected
-      const docColls = data.collections.filter((c) => c.type === 'documents');
+      const docColls = data.collections.filter(isPrimarySearchCollection);
       setCurrentCollection((prev) => {
-        if (prev && docColls.some((c) => c.name === prev)) return prev;
-        const def = docColls.find((c) => c.name === 'three-stage-search');
-        return def?.name || docColls[0]?.name || '';
+        if (prev && docColls.some((c) => collectionId(c) === prev)) return prev;
+        const def = docColls.find((c) => collectionId(c) === 'three-stage-search' || c.name === 'three-stage-search');
+        return def ? collectionId(def) : (docColls[0] ? collectionId(docColls[0]) : '');
       });
     } catch (e) {
       console.error('Failed to load stats:', e);

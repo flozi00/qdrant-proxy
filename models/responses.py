@@ -14,7 +14,7 @@ class DocumentResponse(BaseModel):
     metadata: Dict[str, Any]
     vector_count: int
     title: Optional[str] = Field(
-        None, description="Page title extracted from Docling document structure"
+        None, description="Page title extracted from document content"
     )
     hyperlinks: Optional[List[str]] = Field(
         None, description="All hyperlinks extracted from the page (including navigation)"
@@ -80,6 +80,7 @@ class HealthResponse(BaseModel):
     status: str
     qdrant_connected: bool
     colbert_loaded: bool
+    late_model_enabled: bool
     collection_exists: bool
     # Optional fields for deep health check
     dense_model_loaded: Optional[bool] = None

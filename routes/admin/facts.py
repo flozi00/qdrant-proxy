@@ -16,11 +16,10 @@ from fastapi import APIRouter, Depends, HTTPException, status
 logger = logging.getLogger(__name__)
 from models import AdminFAQItem, AdminFAQsResponse
 from qdrant_client import models
+from services.hybrid_search import encode_hybrid_query, execute_hybrid_search
 from state import get_app_state
 
 from services import (
-    encode_dense,
-    encode_query,
     ensure_faq_indexes,
     get_faq_collection_name,
     parse_source_documents,
@@ -67,30 +66,17 @@ async def admin_list_faqs(
 
         # If search query provided, use semantic search
         if search:
-            query_colbert = await encode_query(search)
-            query_dense = await encode_dense(search)
-
-            results = qdrant_client.query_points(
+            query_colbert, query_dense = await encode_hybrid_query(search)
+            results = execute_hybrid_search(
+                qdrant_client=qdrant_client,
                 collection_name=faq_collection,
-                prefetch=[
-                    models.Prefetch(
-                        query=query_colbert,
-                        using="colbert",
-                        limit=limit * 5,
-                        filter=query_filter,
-                        params=models.SearchParams(exact=True),
-                    ),
-                    models.Prefetch(
-                        query=query_dense,
-                        using="dense",
-                        limit=limit * 5,
-                        filter=query_filter,
-                    ),
-                ],
-                query=models.FusionQuery(fusion=models.Fusion.DBSF),
+                query_multivector=query_colbert,
+                query_dense=query_dense,
                 limit=limit,
+                query_filter=query_filter,
                 with_payload=True,
-            ).points
+                prefetch_multiplier=5,
+            )
 
             items = []
             for point in results:

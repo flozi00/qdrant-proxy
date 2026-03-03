@@ -29,7 +29,13 @@ class SearchRequest(BaseModel):
     limit: int = Field(50, ge=1, le=100, description="Number of results to return")
     use_hybrid: bool = Field(True, description="Use hybrid search (dense + colbert)")
     score_threshold: Optional[float] = Field(
-        None, ge=0.0, le=1.0, description="Minimum score threshold"
+        None,
+        ge=0.0,
+        le=100.0,
+        description=(
+            "Minimum score threshold. Dense mode expects 0-1. "
+            "Legacy ColBERT-style thresholds (>1) are auto-normalized in dense fallback mode."
+        ),
     )
     collection_name: Optional[str] = Field(
         None, description="Optional collection name override"

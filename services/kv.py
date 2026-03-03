@@ -10,8 +10,11 @@ import uuid
 from datetime import datetime
 from typing import Dict, List, Optional
 
-from config import settings
 from qdrant_client import QdrantClient, models
+from services.qdrant_ops import (
+    build_feedback_dense_vectors_config,
+    build_hybrid_vectors_config,
+)
 
 from utils.timings import linetimer
 
@@ -74,6 +77,9 @@ def ensure_kv_collection(collection_name: str) -> str:
     """
     client = _get_qdrant_client()
     kv_col = get_kv_collection_name(collection_name)
+    from state import get_app_state
+
+    dense_vector_size = get_app_state().dense_vector_size
 
     if client.collection_exists(kv_col):
         return kv_col
@@ -81,19 +87,9 @@ def ensure_kv_collection(collection_name: str) -> str:
     try:
         client.create_collection(
             collection_name=kv_col,
-            vectors_config={
-                "colbert": models.VectorParams(
-                    size=128,
-                    distance=models.Distance.COSINE,
-                    multivector_config=models.MultiVectorConfig(
-                        comparator=models.MultiVectorComparator.MAX_SIM
-                    ),
-                ),
-                "dense": models.VectorParams(
-                    size=settings.dense_vector_size,
-                    distance=models.Distance.COSINE,
-                ),
-            },
+            vectors_config=build_hybrid_vectors_config(
+                dense_vector_size=dense_vector_size,
+            ),
             on_disk_payload=False,
         )
         # Payload indexes for key lookups
@@ -274,7 +270,11 @@ async def search_kv(
     Returns:
         List of matching KV entries with scores
     """
-    from services.embedding import encode_dense, encode_query
+    from services.hybrid_search import (
+        encode_hybrid_query,
+        execute_hybrid_search,
+        normalize_score_threshold_for_mode,
+    )
 
     client = _get_qdrant_client()
     kv_col = get_kv_collection_name(collection_name)
@@ -283,31 +283,25 @@ async def search_kv(
         return []
 
     try:
-        # Encode query
-        query_colbert = await encode_query(query)
-        dense_vector = await encode_dense(query)
-
-        prefetch_limit = max(limit * 10, 50)
-
-        # Two-stage search: dense prefetch → ColBERT rerank
-        results = client.query_points(
+        # Universal query encoding + hybrid search pipeline.
+        query_colbert, dense_vector = await encode_hybrid_query(query)
+        effective_threshold = normalize_score_threshold_for_mode(
+            score_threshold,
+            colbert_active=query_colbert is not None,
+        )
+        results = execute_hybrid_search(
+            qdrant_client=client,
             collection_name=kv_col,
-            prefetch=[
-                models.Prefetch(
-                    query=dense_vector,
-                    using="dense",
-                    limit=prefetch_limit,
-                ),
-            ],
-            query=query_colbert,
-            using="colbert",
+            query_multivector=query_colbert,
+            query_dense=dense_vector,
             limit=limit,
             with_payload=True,
-        ).points
+            min_prefetch_limit=50,
+        )
 
         entries = []
         for p in results:
-            if p.score < score_threshold:
+            if effective_threshold is not None and p.score < effective_threshold:
                 continue
             entries.append(
                 {
@@ -343,6 +337,9 @@ def ensure_kv_feedback_collection(collection_name: str) -> str:
     """
     client = _get_qdrant_client()
     fb_col = get_kv_feedback_collection_name(collection_name)
+    from state import get_app_state
+
+    dense_vector_size = get_app_state().dense_vector_size
 
     if client.collection_exists(fb_col):
         return fb_col
@@ -350,13 +347,9 @@ def ensure_kv_feedback_collection(collection_name: str) -> str:
     try:
         client.create_collection(
             collection_name=fb_col,
-            vectors_config={
-                "dense": models.VectorParams(
-                    size=settings.dense_vector_size,
-                    distance=models.Distance.COSINE,
-                    hnsw_config=models.HnswConfigDiff(m=16, ef_construct=64),
-                ),
-            },
+            vectors_config=build_feedback_dense_vectors_config(
+                dense_vector_size=dense_vector_size,
+            ),
         )
         for field, schema in [
             ("kv_id", models.PayloadSchemaType.KEYWORD),

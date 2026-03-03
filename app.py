@@ -23,7 +23,7 @@ import re
 import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set
 from urllib.parse import urlsplit, urlunsplit
 
 # Auth utilities
@@ -56,6 +56,12 @@ from qdrant_client import QdrantClient, models
 from routes.admin import router as admin_router
 from routes.kv import router as kv_router
 from routes.search import router as search_router
+from services.embedding import is_late_model_enabled
+from services.hybrid_search import (
+    encode_hybrid_query,
+    execute_hybrid_search,
+    search_faqs,
+)
 from starlette.middleware import Middleware
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
@@ -68,7 +74,6 @@ from state import get_app_state
 from services import (
     encode_dense,
     encode_document,
-    encode_query,
     ensure_collection,
     ensure_feedback_collection,
     get_faq_collection_name,
@@ -133,6 +138,112 @@ def _build_url_variants(raw_url: str) -> List[str]:
         add_variant(url.rstrip("/"))
 
     return variants
+
+
+def _normalize_allowed_domains(allowed_domains: Optional[List[str]]) -> List[str]:
+    """Normalize domain filters to lowercase hostnames without port/path/www."""
+    if not allowed_domains:
+        return []
+
+    normalized: List[str] = []
+    for raw_domain in allowed_domains:
+        candidate = (raw_domain or "").strip().lower()
+        if not candidate:
+            continue
+
+        if "://" in candidate:
+            hostname = urlsplit(candidate).hostname or ""
+        else:
+            parsed = urlsplit(f"https://{candidate}")
+            hostname = parsed.hostname or candidate.split("/")[0]
+
+        hostname = hostname.strip(".").split(":")[0]
+        if hostname.startswith("www."):
+            hostname = hostname[4:]
+
+        if hostname and hostname not in normalized:
+            normalized.append(hostname)
+
+    return normalized
+
+
+def _domain_matches_allowed(domain: str, allowed_domains: List[str]) -> bool:
+    """Return True if domain matches any allowed domain (including subdomains)."""
+    normalized_domain = (domain or "").strip().lower().strip(".")
+    if not normalized_domain:
+        return False
+
+    if normalized_domain.startswith("www."):
+        normalized_domain = normalized_domain[4:]
+
+    for allowed in allowed_domains:
+        if normalized_domain == allowed or normalized_domain.endswith(f".{allowed}"):
+            return True
+    return False
+
+
+def _collect_allowed_doc_ids(
+    qdrant_client: QdrantClient,
+    collection_name: str,
+    allowed_domains: List[str],
+) -> Set[str]:
+    """Collect document IDs whose URL/domain matches the allowed domain list."""
+    if not allowed_domains:
+        return set()
+
+    matched_doc_ids: Set[str] = set()
+    offset = None
+
+    while True:
+        points, offset = qdrant_client.scroll(
+            collection_name=collection_name,
+            limit=512,
+            offset=offset,
+            with_payload=["url", "metadata.domain"],
+            with_vectors=False,
+        )
+
+        for point in points:
+            payload = point.payload or {}
+            metadata = payload.get("metadata") or {}
+            domain = metadata.get("domain")
+            if not domain:
+                domain = urlsplit(payload.get("url", "")).hostname or ""
+
+            if _domain_matches_allowed(domain, allowed_domains):
+                matched_doc_ids.add(str(point.id))
+
+        if offset is None:
+            break
+
+    return matched_doc_ids
+
+
+def _build_doc_id_filter(doc_ids: Set[str]) -> Optional[models.Filter]:
+    if not doc_ids:
+        return None
+
+    return models.Filter(
+        must=[
+            models.HasIdCondition(
+                has_id=sorted(doc_ids),
+            )
+        ]
+    )
+
+
+def _build_faq_doc_filter(doc_ids: Set[str]) -> Optional[models.Filter]:
+    if not doc_ids:
+        return None
+
+    return models.Filter(
+        must=[
+            models.FieldCondition(
+                key="source_documents[].document_id",
+                match=models.MatchAny(any=sorted(doc_ids)),
+            )
+        ]
+    )
 
 
 def _resolve_document_by_url(
@@ -239,6 +350,7 @@ async def search_knowledge_base(
     query: str,
     limit: int = 10,
     collection_name: str | None = None,
+    allowed_domains: Optional[List[str]] = None,
 ) -> dict:
     """Search indexed documents and extracted FAQs from websites.
 
@@ -250,9 +362,9 @@ async def search_knowledge_base(
         query: The search query text
         limit: Maximum number of results (1-50, default 10)
         collection_name: Optional collection to search (defaults to main collection)
+        allowed_domains: Optional list of allowed domains to restrict both
+            document and FAQ search scope (e.g. ["example.com", "docs.example.com"])
     """
-    from services.hybrid_search import build_hybrid_prefetch, search_faqs
-
     state = get_app_state()
     qdrant_client = state.qdrant_client
 
@@ -262,21 +374,42 @@ async def search_knowledge_base(
     # Ensure collection exists
     ensure_collection(target_collection)
 
-    # Encode query vectors
-    query_multivector = await encode_query(query)
-    query_dense = await encode_dense(query)
+    normalized_allowed_domains = _normalize_allowed_domains(allowed_domains)
+    allowed_doc_ids: Set[str] = set()
+    document_filter = None
+    faq_filter = None
+    if normalized_allowed_domains:
+        allowed_doc_ids = _collect_allowed_doc_ids(
+            qdrant_client=qdrant_client,
+            collection_name=target_collection,
+            allowed_domains=normalized_allowed_domains,
+        )
+
+        if not allowed_doc_ids:
+            return {
+                "faqs": [],
+                "documents": [],
+                "total": 0,
+                "applied_allowed_domains": normalized_allowed_domains,
+                "message": "No documents matched allowed_domains",
+            }
+
+        document_filter = _build_doc_id_filter(allowed_doc_ids)
+        faq_filter = _build_faq_doc_filter(allowed_doc_ids)
+
+    # Encode query vectors once for the shared hybrid pipeline.
+    query_multivector, query_dense = await encode_hybrid_query(query)
     # Search for related FAQs first (needed for document boosting)
     faq_collection = get_faq_collection_name(target_collection)
     faqs = await search_faqs(
         query_multivector=query_multivector,
         query_dense=query_dense,
         faq_collection=faq_collection,
+        query_filter=faq_filter,
         as_dict=True,
     )
 
-    # Hybrid search: Dense prefetch, ColBERT rerank
-    prefetch_limit = max(limit * 10, 100)
-    prefetch = build_hybrid_prefetch(query_dense, prefetch_limit)
+    extra_prefetch = []
 
     # Boost documents from FAQ source URLs by adding them as extra prefetch
     boosted_doc_ids = set()
@@ -290,31 +423,36 @@ async def search_knowledge_base(
 
         if faq_source_urls:
             boosted_doc_ids = {url_to_doc_id(u) for u in faq_source_urls}
+            if allowed_doc_ids:
+                boosted_doc_ids = {d for d in boosted_doc_ids if d in allowed_doc_ids}
             logger.info(
                 f"Boosting {len(boosted_doc_ids)} documents from {len(faqs)} FAQ source URLs"
             )
-            prefetch.append(
-                models.Prefetch(
-                    query=query_dense,
-                    using="dense",
-                    limit=len(boosted_doc_ids),
-                    filter=models.Filter(
-                        should=[models.HasIdCondition(has_id=list(boosted_doc_ids))]
+            if boosted_doc_ids:
+                extra_prefetch.append(
+                    models.Prefetch(
+                        query=query_dense,
+                        using="dense",
+                        limit=len(boosted_doc_ids),
+                        filter=models.Filter(
+                            should=[models.HasIdCondition(has_id=list(boosted_doc_ids))]
+                        ),
+                        params=models.SearchParams(hnsw_ef=64, exact=False),
                     ),
-                    params=models.SearchParams(hnsw_ef=64, exact=False),
-                ),
-            )
+                )
 
     effective_limit = limit + len(boosted_doc_ids)
 
-    results = qdrant_client.query_points(
+    results = execute_hybrid_search(
+        qdrant_client=qdrant_client,
         collection_name=target_collection,
-        prefetch=prefetch,
-        query=query_multivector,
-        using="colbert",
+        query_multivector=query_multivector,
+        query_dense=query_dense,
         limit=effective_limit,
+        query_filter=document_filter,
         with_payload=True,
-    ).points
+        extra_prefetch=extra_prefetch,
+    )
 
     # Format document results
     documents = []
@@ -335,10 +473,15 @@ async def search_knowledge_base(
             }
         )
 
-    return {
+    response = {
         "faqs": faqs,
         "documents": documents,
     }
+
+    if normalized_allowed_domains:
+        response["applied_allowed_domains"] = normalized_allowed_domains
+
+    return response
 
 
 @mcp.tool
@@ -420,6 +563,7 @@ async def search_faq_entries(
     query: str,
     limit: int = 10,
     min_score: float = 25.0,
+    allowed_domains: Optional[List[str]] = None,
 ) -> dict:
     """Search FAQ entries in the knowledge base using hybrid semantic search.
 
@@ -429,59 +573,58 @@ async def search_faq_entries(
     Args:
         query: Natural language search query
         limit: Maximum entries to return (1-50, default 10)
-        min_score: Minimum ColBERT score threshold (default 25.0)
+        min_score: Minimum score threshold (default 25.0 on ColBERT scale).
+            In dense-only fallback mode, values >1 are auto-normalized.
+        allowed_domains: Optional list of allowed domains. When set,
+            only FAQ entries linked to documents from these domains are searched.
 
     Returns:
         Dict with 'faqs' list containing matching FAQ entries with scores
     """
-    from qdrant_client import models as qdrant_models
-
     state = get_app_state()
     qdrant_client = state.qdrant_client
 
     faq_collection = get_faq_collection_name(settings.collection_name)
     limit = max(1, min(50, limit))
+    normalized_allowed_domains = _normalize_allowed_domains(allowed_domains)
 
     if not qdrant_client.collection_exists(faq_collection):
         return {"faqs": [], "total": 0, "message": "FAQ collection does not exist"}
 
+    faq_filter = None
+    if normalized_allowed_domains:
+        allowed_doc_ids = _collect_allowed_doc_ids(
+            qdrant_client=qdrant_client,
+            collection_name=settings.collection_name,
+            allowed_domains=normalized_allowed_domains,
+        )
+
+        if not allowed_doc_ids:
+            return {
+                "faqs": [],
+                "total": 0,
+                "applied_allowed_domains": normalized_allowed_domains,
+                "message": "No documents matched allowed_domains",
+            }
+
+        faq_filter = _build_faq_doc_filter(allowed_doc_ids)
+
     try:
-        query_colbert = await encode_query(query)
-        query_dense = await encode_dense(query)
-        prefetch_limit = max(limit * 5, 50)
-
-        results = qdrant_client.query_points(
-            collection_name=faq_collection,
-            prefetch=[
-                qdrant_models.Prefetch(
-                    query=query_dense,
-                    using="dense",
-                    limit=prefetch_limit,
-                    params=qdrant_models.SearchParams(hnsw_ef=128),
-                ),
-            ],
-            query=query_colbert,
-            using="colbert",
+        query_colbert, query_dense = await encode_hybrid_query(query)
+        faqs = await search_faqs(
+            query_multivector=query_colbert,
+            query_dense=query_dense,
+            faq_collection=faq_collection,
             limit=limit,
-            with_payload=True,
-        ).points
+            min_score=min_score,
+            query_filter=faq_filter,
+            as_dict=True,
+        )
 
-        faqs = []
-        for point in results:
-            if point.score >= min_score:
-                payload = point.payload
-                faqs.append(
-                    {
-                        "id": str(point.id),
-                        "score": point.score,
-                        "question": payload.get("question", ""),
-                        "answer": payload.get("answer", ""),
-                        "source_documents": payload.get("source_documents", []),
-                        "source_count": payload.get("source_count", 0),
-                    }
-                )
-
-        return {"faqs": faqs, "total": len(faqs)}
+        response = {"faqs": faqs, "total": len(faqs)}
+        if normalized_allowed_domains:
+            response["applied_allowed_domains"] = normalized_allowed_domains
+        return response
 
     except Exception as e:
         logger.error(f"search_faq_entries failed: {e}")
@@ -1216,6 +1359,7 @@ async def health_check(deep: bool = False):
     base_status = {
         "qdrant_connected": qdrant_client is not None,
         "colbert_loaded": state.colbert_model is not None,
+        "late_model_enabled": is_late_model_enabled(),
         "collection_exists": collection_exists,
         "dense_model_loaded": state.dense_model is not None,
     }
@@ -1224,7 +1368,6 @@ async def health_check(deep: bool = False):
         # Basic health check
         is_healthy = (
             qdrant_client
-            and state.colbert_model
             and state.dense_model
             and collection_exists
         )
@@ -1237,27 +1380,32 @@ async def health_check(deep: bool = False):
     test_text = "This is a health check test for embedding generation and search."
 
     # ==== Test 1: Embedding Generation (ColBERT + Dense) ====
-    # Test 1a: ColBERT embedding generation
-    try:
-        start_time = time.time()
-        colbert_vectors = await encode_document(test_text)
-        colbert_time = round(time.time() - start_time, 3)
+    base_status["embedding_test"] = {}
 
-        base_status["embedding_test"] = {
-            "colbert_success": True,
-            "colbert_time_seconds": colbert_time,
-            "colbert_vectors_count": len(colbert_vectors),
-        }
-    except Exception as e:
-        logger.error(f"ColBERT embedding test failed: {e}")
-        base_status["embedding_test"] = {
-            "colbert_success": False,
-            "colbert_error": str(e),
-        }
-        return HealthResponse(
-            status="unhealthy",
-            error=f"ColBERT embedding failed: {e}",
-            **base_status,
+    # Test 1a: ColBERT embedding generation (optional)
+    if is_late_model_enabled():
+        try:
+            start_time = time.time()
+            colbert_vectors = await encode_document(test_text)
+            colbert_time = round(time.time() - start_time, 3)
+
+            base_status["embedding_test"]["colbert_success"] = True
+            base_status["embedding_test"]["colbert_time_seconds"] = colbert_time
+            base_status["embedding_test"]["colbert_vectors_count"] = len(colbert_vectors)
+        except Exception as e:
+            logger.error(f"ColBERT embedding test failed: {e}")
+            base_status["embedding_test"]["colbert_success"] = False
+            base_status["embedding_test"]["colbert_error"] = str(e)
+            return HealthResponse(
+                status="unhealthy",
+                error=f"ColBERT embedding failed: {e}",
+                **base_status,
+            )
+    else:
+        base_status["embedding_test"]["colbert_success"] = True
+        base_status["embedding_test"]["colbert_skipped"] = True
+        base_status["embedding_test"]["colbert_reason"] = (
+            "COLBERT_EMBEDDING_URL not configured"
         )
 
     # Test 1b: Dense embedding generation
@@ -1313,32 +1461,23 @@ async def health_check(deep: bool = False):
     if collection_exists:
         try:
             start_time = time.time()
-            query_colbert = await encode_query(test_text)
-            query_dense = await encode_dense(test_text)
-            # Full hybrid search: Dense prefetch, ColBERT rerank
-            results = qdrant_client.query_points(
+            query_colbert, query_dense = await encode_hybrid_query(test_text)
+            results = execute_hybrid_search(
+                qdrant_client=qdrant_client,
                 collection_name=settings.collection_name,
-                prefetch=[
-                    # Dense vector search with HNSW
-                    models.Prefetch(
-                        query=query_dense,
-                        using="dense",
-                        limit=10,
-                        params=models.SearchParams(hnsw_ef=64, exact=False),
-                    ),
-                ],
-                # ColBERT MaxSim reranking
-                query=query_colbert,
-                using="colbert",
+                query_multivector=query_colbert,
+                query_dense=query_dense,
                 limit=1,
                 with_payload=False,
+                prefetch_limit=10,
+                hnsw_ef=64,
             )
             hybrid_time = round(time.time() - start_time, 3)
 
             base_status["hybrid_search_test"] = {
                 "success": True,
                 "hybrid_time_seconds": hybrid_time,
-                "results_count": len(results.points) if results.points else 0,
+                "results_count": len(results),
             }
         except Exception as e:
             logger.error(f"Hybrid search test failed: {e}")
@@ -1554,7 +1693,7 @@ async def upsert_document_logic(
     logger.info(f"Generating dense embeddings for {url_str}")
     dense_vector = await encode_dense(content)
 
-    # Prepare payload with enriched docling metadata
+    # Prepare payload with enriched extraction metadata
     payload = {"url": url_str, "content": content, "metadata": metadata or {}}
     if title:
         payload["title"] = title
@@ -1798,172 +1937,6 @@ async def delete_collection_endpoint(collection_name: str):
         )
 
 
-# Search endpoints are in routes/search.py
-
-
-@linetimer()
-@app.post("/collections/{collection_name}/deduplicate")
-async def deduplicate_redirects(collection_name: str, dry_run: bool = False):
-    """Deduplicate documents by resolving redirects and removing duplicates.
-
-    This endpoint:
-    1. Scrolls through all documents in the collection
-    2. Resolves redirects for each URL
-    3. Identifies duplicates (multiple entries pointing to same final URL)
-    4. Keeps the newest entry, deletes older duplicates
-
-    Args:
-        collection_name: Collection to deduplicate
-        dry_run: If True, only report duplicates without deleting
-
-    Returns:
-        Statistics about duplicates found and removed
-    """
-    logger.info(
-        f"Starting deduplication for collection '{collection_name}' (dry_run={dry_run})"
-    )
-
-    state = get_app_state()
-    qdrant_client = state.qdrant_client
-
-    try:
-        # Ensure collection exists
-        if not qdrant_client.collection_exists(collection_name):
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"Collection '{collection_name}' not found",
-            )
-
-        # Map final URL -> list of (doc_id, original_url, indexed_at)
-        final_url_map: Dict[str, List[tuple]] = {}
-        total_checked = 0
-        redirect_count = 0
-
-        # Scroll through all documents
-        offset = None
-        batch_size = 100
-
-        while True:
-            result, next_offset = qdrant_client.scroll(
-                collection_name=collection_name,
-                limit=batch_size,
-                offset=offset,
-                with_payload=True,
-                with_vectors=False,
-            )
-
-            if not result:
-                break
-
-            for point in result:
-                total_checked += 1
-                url = point.payload.get("url", "")
-                doc_id = str(point.id)
-                metadata = point.payload.get("metadata", {})
-                indexed_at = metadata.get("indexed_at", "")
-
-                if not url:
-                    continue
-
-                # Resolve redirects
-                final_url = await resolve_url_redirects(url, use_head=True)
-                if not final_url:
-                    logger.warning(f"Could not resolve {url}, skipping")
-                    continue
-
-                if final_url != url:
-                    redirect_count += 1
-                    logger.debug(f"Redirect: {url} -> {final_url}")
-
-                # Track all docs that resolve to same final URL
-                if final_url not in final_url_map:
-                    final_url_map[final_url] = []
-
-                final_url_map[final_url].append((doc_id, url, indexed_at))
-
-            offset = next_offset
-            if not offset:
-                break
-
-            # Log progress
-            if total_checked % 500 == 0:
-                logger.info(f"Deduplication progress: checked {total_checked}")
-
-        # Find duplicates
-        duplicates = []
-        for final_url, entries in final_url_map.items():
-            if len(entries) > 1:
-                # Sort by indexed_at timestamp (keep newest)
-                sorted_entries = sorted(
-                    entries, key=lambda x: x[2] or "", reverse=True  # indexed_at
-                )
-
-                # Keep first (newest), mark rest for deletion
-                keep = sorted_entries[0]
-                delete = sorted_entries[1:]
-
-                duplicates.append(
-                    {
-                        "final_url": final_url,
-                        "keep": {
-                            "doc_id": keep[0],
-                            "url": keep[1],
-                            "indexed_at": keep[2],
-                        },
-                        "delete": [
-                            {"doc_id": d[0], "url": d[1], "indexed_at": d[2]}
-                            for d in delete
-                        ],
-                    }
-                )
-
-        # Delete duplicates if not dry run
-        deleted_count = 0
-        if not dry_run and duplicates:
-            for dup in duplicates:
-                for entry in dup["delete"]:
-                    try:
-                        qdrant_client.delete(
-                            collection_name=collection_name,
-                            points_selector=models.PointIdsList(
-                                points=[entry["doc_id"]]
-                            ),
-                        )
-                        deleted_count += 1
-                        logger.info(
-                            f"Deleted duplicate {entry['url']} (kept {dup['keep']['url']})"
-                        )
-                    except Exception as e:
-                        logger.error(f"Failed to delete {entry['doc_id']}: {e}")
-
-        result = {
-            "collection": collection_name,
-            "total_checked": total_checked,
-            "redirects_found": redirect_count,
-            "unique_final_urls": len(final_url_map),
-            "duplicate_groups": len(duplicates),
-            "total_duplicates": sum(len(d["delete"]) for d in duplicates),
-            "deleted": deleted_count if not dry_run else 0,
-            "dry_run": dry_run,
-            "duplicates": (
-                duplicates[:10] if dry_run else []
-            ),  # Show first 10 in dry run
-        }
-
-        logger.info(
-            f"Deduplication completed: {total_checked} checked, "
-            f"{len(duplicates)} duplicate groups, {deleted_count} deleted"
-        )
-
-        return result
-
-    except Exception as e:
-        logger.error(f"Deduplication failed: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Deduplication failed: {str(e)}",
-        )
-
 
 @app.get("/")
 async def root():
@@ -1980,7 +1953,6 @@ async def root():
             "delete_document": "DELETE /documents/{doc_id}",
             "delete_by_url": "DELETE /documents/by-url/{url}",
             "search": "POST /search",
-            "deduplicate": "POST /collections/{collection_name}/deduplicate",
         },
         "faq_endpoints": {
             "create_faq_entry": "POST (via MCP)",

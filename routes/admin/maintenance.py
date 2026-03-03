@@ -27,15 +27,84 @@ from models.admin import (
     ReembedRequest,
 )
 from qdrant_client import models
+from services.embedding import (
+    get_placeholder_colbert_vector,
+    is_colbert_endpoint_available,
+    is_late_model_enabled,
+)
+from services.qdrant_ops import (
+    build_collection_create_kwargs,
+    build_hybrid_vectors_config,
+)
 from services.system_config import get_model_config, update_model_config
 from state import get_app_state
 
 from services import (
+    encode_dense,
     encode_dense_batch,
     encode_documents_batch,
 )
 
 router = APIRouter()
+
+
+def _resolve_collections_to_process(
+    qdrant_client,
+    collection_name: Optional[str] = None,
+) -> List[str]:
+    """Resolve collections/aliases targeted for blue-green maintenance."""
+    if collection_name:
+        # Check both real collections and aliases
+        exists = qdrant_client.collection_exists(collection_name)
+        if not exists:
+            alias_found = any(
+                a.alias_name == collection_name
+                for a in qdrant_client.get_aliases().aliases
+            )
+            if not alias_found:
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"Collection or alias '{collection_name}' not found",
+                )
+        return [collection_name]
+
+    collections = qdrant_client.get_collections().collections
+    aliases = qdrant_client.get_aliases().aliases
+
+    # Collect alias names (these are what we migrate, not the backing names)
+    alias_names = {a.alias_name for a in aliases}
+    alias_backing = {a.collection_name for a in aliases}
+
+    collections_to_process = []
+    for c in collections:
+        if c.name.endswith("_feedback"):
+            continue
+
+        # If this collection is behind an alias, use the alias name
+        # (even if the backing name contains "_migration_")
+        if c.name in alias_backing:
+            for a in aliases:
+                if a.collection_name == c.name:
+                    collections_to_process.append(a.alias_name)
+        elif "_migration_" in c.name:
+            # Skip orphaned migration collections not behind an alias
+            continue
+        elif c.name not in alias_names:
+            # Real collection with no alias
+            collections_to_process.append(c.name)
+
+    return collections_to_process
+
+
+def _has_active_maintenance_task(alias_name: str, vector_types: List[str]) -> bool:
+    """Return True if a matching maintenance task is already active."""
+    app_state = get_app_state()
+    vector_key = ",".join(vector_types)
+    task_key = f"{alias_name}:{vector_key}"
+    task = app_state.maintenance_tasks.get(task_key)
+    if not task:
+        return False
+    return task.get("status") in {"in-progress", "awaiting_finalize"}
 
 
 def _extract_text_from_point(point: Any, is_faq: bool, is_kv: bool = False) -> str:
@@ -97,57 +166,40 @@ def _create_migration_collection(
     is_faq = source_collection.endswith("_faq")
 
     # --- Vector configuration ---
-    vectors_config: dict = {}
+    vectors_config = build_hybrid_vectors_config(
+        dense_vector_size=get_app_state().dense_vector_size,
+    )
     sparse_vectors_config: dict = {}
+    dense_hnsw_config = None
 
     if isinstance(source_info.config.params.vectors, dict):
         for vec_name, vec_params in source_info.config.params.vectors.items():
-            if vec_name == "colbert":
-                vectors_config["colbert"] = models.VectorParams(
-                    size=128,
-                    distance=models.Distance.COSINE,
-                    multivector_config=models.MultiVectorConfig(
-                        comparator=models.MultiVectorComparator.MAX_SIM
-                    ),
-                )
-            elif vec_name == "dense":
-                vectors_config["dense"] = models.VectorParams(
-                    size=get_app_state().dense_vector_size,
-                    distance=models.Distance.COSINE,
-                    hnsw_config=vec_params.hnsw_config,
-                )
-            else:
+            if vec_name == "dense":
+                dense_hnsw_config = vec_params.hnsw_config
+            elif vec_name not in {"colbert", "dense"}:
                 vectors_config[vec_name] = vec_params
+
+    vectors_config.update(
+        build_hybrid_vectors_config(
+            dense_vector_size=get_app_state().dense_vector_size,
+            dense_hnsw_config=dense_hnsw_config,
+        )
+    )
 
     if source_info.config.params.sparse_vectors:
         for sparse_name in source_info.config.params.sparse_vectors:
             sparse_vectors_config[sparse_name] = models.SparseVectorParams()
 
     # --- Collection creation ---
-    create_kwargs: dict = {
-        "collection_name": target_collection,
-        "vectors_config": vectors_config,
-        "on_disk_payload": True,
-    }
+    create_kwargs = build_collection_create_kwargs(
+        collection_name=target_collection,
+        dense_vector_size=get_app_state().dense_vector_size,
+        is_faq=is_faq,
+        dense_hnsw_config=dense_hnsw_config,
+    )
+    create_kwargs["vectors_config"] = vectors_config
     if sparse_vectors_config:
         create_kwargs["sparse_vectors_config"] = sparse_vectors_config
-
-    if is_faq:
-        create_kwargs["optimizers_config"] = models.OptimizersConfigDiff(
-            indexing_threshold=10000,
-        )
-    else:
-        create_kwargs["optimizers_config"] = models.OptimizersConfigDiff(
-            indexing_threshold=20000,
-            memmap_threshold=5000,
-        )
-        create_kwargs["quantization_config"] = models.ScalarQuantization(
-            scalar=models.ScalarQuantizationConfig(
-                type=models.ScalarType.INT8,
-                quantile=0.99,
-                always_ram=True,
-            )
-        )
 
     qdrant_client.create_collection(**create_kwargs)
 
@@ -243,8 +295,25 @@ async def rearchive_collection(
             if isinstance(info.config.params.vectors, dict)
             else []
         )
+        colbert_requested = (
+            (vector_types is None or "colbert" in vector_types)
+            and "colbert" in available_vector_names
+        )
         update_dense = (vector_types is None or "dense" in vector_types) and "dense" in available_vector_names
-        update_colbert = (vector_types is None or "colbert" in vector_types) and "colbert" in available_vector_names
+        colbert_available = False
+        if colbert_requested and is_late_model_enabled():
+            try:
+                colbert_available = await is_colbert_endpoint_available(force_check=True)
+            except Exception as e:
+                logger.warning(f"ColBERT availability check failed in maintenance: {e}")
+
+        update_colbert = colbert_requested and colbert_available
+        template_colbert = colbert_requested and not update_colbert
+
+        if template_colbert:
+            logger.info(
+                "ColBERT model unavailable; maintenance migration will use placeholder ColBERT vectors to preserve schema compatibility"
+            )
 
         # --- Step 2: Create target collection ---
         _create_migration_collection(source_collection, target_collection)
@@ -301,7 +370,18 @@ async def rearchive_collection(
                     if update_dense:
                         dense_embs = await encode_dense_batch(texts, batch_size=batch_size)
                     if update_colbert:
-                        colbert_embs = await encode_documents_batch(texts, batch_size=batch_size)
+                        try:
+                            colbert_embs = await encode_documents_batch(texts, batch_size=batch_size)
+                        except Exception as e:
+                            # Degrade gracefully: keep migrating with dense vectors and
+                            # empty ColBERT templates to avoid stalling on every batch.
+                            logger.warning(
+                                "ColBERT batch encoding failed during maintenance; switching to empty ColBERT templates for remaining batches: %r",
+                                e,
+                            )
+                            update_colbert = False
+                            template_colbert = True
+                            colbert_embs = None
 
                     upsert_points = []
                     for idx, pid in enumerate(point_ids):
@@ -316,6 +396,9 @@ async def rearchive_collection(
                             vectors["dense"] = dense_embs[idx]
                         if colbert_embs:
                             vectors["colbert"] = colbert_embs[idx]
+                        elif template_colbert:
+                            # Preserve named-vector schema when ColBERT is unavailable.
+                            vectors["colbert"] = get_placeholder_colbert_vector()
 
                         if vectors:
                             upsert_points.append(
@@ -549,19 +632,66 @@ async def get_models_config(
 @router.post("/maintenance/config/models", response_model=ModelUpdateResponse)
 async def update_models_config(
     config: ModelConfig,
+    background_tasks: BackgroundTasks,
     _: bool = Depends(verify_admin_auth),
 ):
     """Update the persistent model configuration and reload models."""
     try:
+        app_state = get_app_state()
+        qdrant_client = app_state.qdrant_client
+        previous_dense_dim = app_state.dense_vector_size
+
         update_model_config(config)
-        
+
         # Reload models (this might take some time)
         from services.embedding import initialize_models
         initialize_models()
-        
+
+        app_state = get_app_state()
+        new_dense_dim = app_state.dense_vector_size
+
+        # Verify dense endpoint is actually working before auto-triggering migration.
+        dense_probe_ok = False
+        try:
+            probe_vector = await encode_dense("dense-dimension-check")
+            dense_probe_ok = len(probe_vector) == new_dense_dim
+        except Exception as probe_error:
+            logger.warning(
+                "Dense probe failed after model update; skipping auto-maintenance trigger: %s",
+                probe_error,
+            )
+
+        auto_triggered_collections: List[str] = []
+        if qdrant_client and dense_probe_ok and new_dense_dim != previous_dense_dim:
+            collections_to_process = _resolve_collections_to_process(qdrant_client)
+            for coll in collections_to_process:
+                if _has_active_maintenance_task(coll, ["dense"]):
+                    continue
+                background_tasks.add_task(
+                    rearchive_collection,
+                    coll,
+                    8,
+                    ["dense"],
+                )
+                auto_triggered_collections.append(coll)
+
+            logger.info(
+                "Auto-triggered dense maintenance migration due to dimension change (%d -> %d) for %d collections",
+                previous_dense_dim,
+                new_dense_dim,
+                len(auto_triggered_collections),
+            )
+
+        message = "Model configuration updated and models reloaded successfully."
+        if auto_triggered_collections:
+            message += (
+                f" Dense dimension changed ({previous_dense_dim} -> {new_dense_dim}); "
+                f"started dense re-embedding for {len(auto_triggered_collections)} collections."
+            )
+
         return ModelUpdateResponse(
             success=True,
-            message="Model configuration updated and models reloaded successfully.",
+            message=message,
             config=config
         )
     except Exception as e:
@@ -605,45 +735,10 @@ async def start_reembedding(
         raise HTTPException(status_code=500, detail="Qdrant client not initialized")
 
     try:
-        if collection_name:
-            # Check both real collections and aliases
-            exists = qdrant_client.collection_exists(collection_name)
-            if not exists:
-                # Also check aliases
-                alias_found = any(
-                    a.alias_name == collection_name
-                    for a in qdrant_client.get_aliases().aliases
-                )
-                if not alias_found:
-                    raise HTTPException(
-                        status_code=404,
-                        detail=f"Collection or alias '{collection_name}' not found",
-                    )
-            collections_to_process = [collection_name]
-        else:
-            collections = qdrant_client.get_collections().collections
-            aliases = qdrant_client.get_aliases().aliases
-
-            # Collect alias names (these are what we migrate, not the backing names)
-            alias_names = {a.alias_name for a in aliases}
-            alias_backing = {a.collection_name for a in aliases}
-
-            collections_to_process = []
-            for c in collections:
-                if c.name.endswith("_feedback"):
-                    continue
-                # If this collection is behind an alias, use the alias name
-                # (even if the backing name contains "_migration_")
-                if c.name in alias_backing:
-                    for a in aliases:
-                        if a.collection_name == c.name:
-                            collections_to_process.append(a.alias_name)
-                elif "_migration_" in c.name:
-                    # Skip orphaned migration collections not behind an alias
-                    continue
-                elif c.name not in alias_names:
-                    # Real collection with no alias
-                    collections_to_process.append(c.name)
+        collections_to_process = _resolve_collections_to_process(
+            qdrant_client=qdrant_client,
+            collection_name=collection_name,
+        )
 
         for coll in collections_to_process:
             background_tasks.add_task(rearchive_collection, coll, batch_size, vector_types)

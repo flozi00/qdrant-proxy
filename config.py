@@ -44,8 +44,10 @@ class Settings(BaseSettings):
     colbert_model_name: str = Field(
         default="VAGOsolutions/SauerkrautLM-Multi-ModernColBERT", alias="COLBERT_MODEL_NAME"
     )
-    colbert_embedding_url: str = Field(
-        default="http://vllm-colbert:9092", alias="COLBERT_EMBEDDING_URL"
+    colbert_embedding_url: Optional[str] = Field(
+        default=None,
+        alias="COLBERT_EMBEDDING_URL",
+        description="Optional ColBERT endpoint for late-interaction reranking",
     )
 
     # LiteLLM Configuration
@@ -66,6 +68,11 @@ class Settings(BaseSettings):
         env_file_encoding = "utf-8"
         extra = "ignore"
         populate_by_name = True
+
+    @property
+    def colbert_endpoint_configured(self) -> bool:
+        """Return True when a non-empty ColBERT endpoint is configured."""
+        return bool((self.colbert_embedding_url or "").strip())
 
 
 @lru_cache

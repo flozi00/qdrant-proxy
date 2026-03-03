@@ -15,6 +15,8 @@ Run with:
     python -m pytest tests/ -v
 """
 
+from urllib.parse import urlsplit
+
 import pytest
 
 from .conftest import mcp_call
@@ -87,6 +89,36 @@ class TestMCPTools:
         assert any(phrase.lower() in content_lower for phrase in EXPECTED_PHRASES), (
             f"None of EXPECTED_PHRASES found in document content.\n"
             f"Content (first 500): {our_doc['content'][:500]}"
+        )
+
+    def test_01b_search_knowledge_base_allowed_domains(self, test_state: dict):
+        """search_knowledge_base respects allowed_domains restrictions."""
+        allowed_result = mcp_call(
+            "search_knowledge_base",
+            query=EXPECTED_PHRASES[0],
+            limit=10,
+            allowed_domains=["wikipedia.org"],
+        )
+
+        assert_no_error(allowed_result, "search_knowledge_base")
+        docs = allowed_result.get("documents", [])
+        assert docs, "Expected domain-scoped search to return Wikipedia docs"
+        for doc in docs:
+            hostname = (urlsplit(doc.get("url", "")).hostname or "").lower()
+            assert hostname.endswith("wikipedia.org"), (
+                f"Found out-of-scope URL in domain-filtered results: {doc.get('url')}"
+            )
+
+        blocked_result = mcp_call(
+            "search_knowledge_base",
+            query=EXPECTED_PHRASES[0],
+            limit=10,
+            allowed_domains=["example.com"],
+        )
+
+        assert_no_error(blocked_result, "search_knowledge_base")
+        assert blocked_result.get("documents", []) == [], (
+            f"Expected no docs for blocked domain filter. Got: {blocked_result}"
         )
 
     def test_02_create_faq_entry(self, test_state: dict):
@@ -168,6 +200,51 @@ class TestMCPTools:
         assert faq_id in faq_ids_returned, (
             f"Created faq_id {faq_id} not found in search results.\n"
             f"Returned IDs: {faq_ids_returned}"
+        )
+
+    def test_04b_search_faq_entries_allowed_domains(self, test_state: dict):
+        """search_faq_entries respects allowed_domains restrictions."""
+        faq_id = test_state.get("faq_id")
+        if not faq_id:
+            # Allow isolated execution with -k allowed_domains
+            bootstrap = mcp_call(
+                "create_faq_entry",
+                question=TEST_FAQ_QUESTION,
+                answer=TEST_FAQ_ANSWER,
+                source_url=TEST_PRIMARY_URL,
+                document_id=test_state["doc_id"],
+                confidence=0.95,
+            )
+            assert_no_error(bootstrap, "create_faq_entry")
+            faq_id = bootstrap.get("faq_id")
+            test_state["faq_id"] = faq_id
+        assert faq_id, "faq_id not set and FAQ bootstrap failed"
+
+        allowed_result = mcp_call(
+            "search_faq_entries",
+            query="vector database",
+            limit=10,
+            min_score=0.0,
+            allowed_domains=["wikipedia.org"],
+        )
+
+        assert_no_error(allowed_result, "search_faq_entries")
+        allowed_faq_ids = [f.get("id") for f in allowed_result.get("faqs", [])]
+        assert faq_id in allowed_faq_ids, (
+            f"Expected faq_id {faq_id} in domain-scoped FAQ search. Got: {allowed_faq_ids}"
+        )
+
+        blocked_result = mcp_call(
+            "search_faq_entries",
+            query="vector database",
+            limit=10,
+            min_score=0.0,
+            allowed_domains=["example.com"],
+        )
+
+        assert_no_error(blocked_result, "search_faq_entries")
+        assert blocked_result.get("faqs", []) == [], (
+            f"Expected no FAQs for blocked domain filter. Got: {blocked_result}"
         )
 
     def test_05_add_source_to_faq_entry(self, test_state: dict):

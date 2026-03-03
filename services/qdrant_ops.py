@@ -7,7 +7,7 @@ Provides functions for:
 """
 
 import logging
-from typing import Optional
+from typing import Any, Optional
 
 from config import settings
 from qdrant_client import QdrantClient, models
@@ -15,6 +15,111 @@ from qdrant_client import QdrantClient, models
 from utils.timings import linetimer
 
 logger = logging.getLogger(__name__)
+
+
+def _build_colbert_vector_params() -> models.VectorParams:
+    """Build standard ColBERT vector params for hybrid search collections."""
+    return models.VectorParams(
+        size=128,  # LFM2-ColBERT-350M dimension
+        distance=models.Distance.COSINE,
+        quantization_config=build_scalar_quantization_config(),
+        multivector_config=models.MultiVectorConfig(
+            comparator=models.MultiVectorComparator.MAX_SIM
+        ),
+    )
+
+
+def _build_dense_vector_params(
+    dense_vector_size: int,
+    dense_hnsw_config: Optional[Any] = None,
+) -> models.VectorParams:
+    """Build standard dense vector params for hybrid search collections."""
+    return models.VectorParams(
+        size=dense_vector_size,
+        distance=models.Distance.COSINE,
+        hnsw_config=dense_hnsw_config,
+        quantization_config=build_dense_binary_quantization_config(),
+    )
+
+
+def build_hybrid_vectors_config(
+    dense_vector_size: int,
+    dense_hnsw_config: Optional[Any] = None,
+) -> dict[str, models.VectorParams]:
+    """Build the standard ColBERT + dense vector config used by core collections."""
+    return {
+        "colbert": _build_colbert_vector_params(),
+        "dense": _build_dense_vector_params(dense_vector_size, dense_hnsw_config),
+    }
+
+
+def build_feedback_dense_vectors_config(
+    dense_vector_size: int,
+) -> dict[str, models.VectorParams]:
+    """Build dense-only vector config used by feedback collections."""
+    return {
+        "dense": models.VectorParams(
+            size=dense_vector_size,
+            distance=models.Distance.COSINE,
+            hnsw_config=models.HnswConfigDiff(m=16, ef_construct=64),
+            quantization_config=build_dense_binary_quantization_config(),
+        )
+    }
+
+
+def build_dense_binary_quantization_config() -> models.BinaryQuantization:
+    """Build 2-bit binary quantization config for dense vectors."""
+    return models.BinaryQuantization(
+        binary=models.BinaryQuantizationConfig(
+            encoding=models.BinaryQuantizationEncoding.TWO_BITS,
+            always_ram=True,
+        )
+    )
+
+
+def build_scalar_quantization_config() -> models.ScalarQuantization:
+    """Build default scalar quantization config for main document collections."""
+    return models.ScalarQuantization(
+        scalar=models.ScalarQuantizationConfig(
+            type=models.ScalarType.INT8,
+            quantile=0.99,
+            always_ram=True,
+        )
+    )
+
+
+def build_optimizers_config(is_faq: bool) -> models.OptimizersConfigDiff:
+    """Build optimizer config for FAQ vs main document collections."""
+    if is_faq:
+        return models.OptimizersConfigDiff(indexing_threshold=10000)
+
+    return models.OptimizersConfigDiff(
+        indexing_threshold=20000,
+        memmap_threshold=5000,
+    )
+
+
+def build_collection_create_kwargs(
+    collection_name: str,
+    dense_vector_size: int,
+    is_faq: bool,
+    dense_hnsw_config: Optional[Any] = None,
+) -> dict[str, Any]:
+    """Build canonical collection creation kwargs for hybrid document/FAQ collections."""
+    create_kwargs: dict[str, Any] = {
+        "collection_name": collection_name,
+        "vectors_config": build_hybrid_vectors_config(
+            dense_vector_size=dense_vector_size,
+            dense_hnsw_config=dense_hnsw_config,
+        ),
+        "optimizers_config": build_optimizers_config(is_faq=is_faq),
+        "on_disk_payload": True,
+    }
+
+    if not is_faq:
+        create_kwargs["quantization_config"] = build_scalar_quantization_config()
+
+    return create_kwargs
 
 
 def _get_qdrant_client(client: Optional[QdrantClient] = None) -> QdrantClient:
@@ -60,13 +165,9 @@ def ensure_feedback_collection(base_collection: str) -> None:
 
         client.create_collection(
             collection_name=feedback_collection,
-            vectors_config={
-                "dense": models.VectorParams(
-                    size=settings.dense_vector_size,
-                    distance=models.Distance.COSINE,
-                    hnsw_config=models.HnswConfigDiff(m=16, ef_construct=64),
-                ),
-            },
+            vectors_config=build_feedback_dense_vectors_config(
+                dense_vector_size=settings.dense_vector_size
+            ),
         )
 
         # Create payload indexes for fast lookups
@@ -124,32 +225,11 @@ def ensure_collection(
 
     try:
         client.create_collection(
-            collection_name=collection_name,
-            vectors_config={
-                "colbert": models.VectorParams(
-                    size=128,  # LFM2-ColBERT-350M dimension
-                    distance=models.Distance.COSINE,
-                    multivector_config=models.MultiVectorConfig(
-                        comparator=models.MultiVectorComparator.MAX_SIM
-                    ),
-                ),
-                "dense": models.VectorParams(
-                    size=vector_size,
-                    distance=models.Distance.COSINE,
-                ),
-            },
-            optimizers_config=models.OptimizersConfigDiff(
-                indexing_threshold=20000,
-                memmap_threshold=5000,
-            ),
-            on_disk_payload=True,
-            quantization_config=models.ScalarQuantization(
-                scalar=models.ScalarQuantizationConfig(
-                    type=models.ScalarType.INT8,
-                    quantile=0.99,
-                    always_ram=True,
-                )
-            ),
+            **build_collection_create_kwargs(
+                collection_name=collection_name,
+                dense_vector_size=vector_size,
+                is_faq=False,
+            )
         )
         logger.info(f"Created collection {collection_name}")
 
@@ -189,24 +269,11 @@ def ensure_faq_collection(
 
     try:
         client.create_collection(
-            collection_name=faq_collection,
-            vectors_config={
-                "colbert": models.VectorParams(
-                    size=128,
-                    distance=models.Distance.COSINE,
-                    multivector_config=models.MultiVectorConfig(
-                        comparator=models.MultiVectorComparator.MAX_SIM
-                    ),
-                ),
-                "dense": models.VectorParams(
-                    size=_get_state().dense_vector_size,
-                    distance=models.Distance.COSINE,
-                ),
-            },
-            optimizers_config=models.OptimizersConfigDiff(
-                indexing_threshold=10000,
-            ),
-            on_disk_payload=True,
+            **build_collection_create_kwargs(
+                collection_name=faq_collection,
+                dense_vector_size=_get_state().dense_vector_size,
+                is_faq=True,
+            )
         )
         logger.info(f"Created FAQ collection {faq_collection}")
 
