@@ -31,6 +31,7 @@ from services.hybrid_search import (
 from state import get_app_state
 
 from services import (
+    enqueue_query,
     ensure_collection,
     get_faq_collection_name,
     transform_scores_for_contrast,
@@ -304,6 +305,15 @@ async def search_documents(search: SearchRequest):
             )
             for f in related_faqs
         ]
+
+        try:
+            enqueue_query(
+                query=search.query,
+                source="qdrant_http_search",
+                collection_name=target_collection,
+            )
+        except Exception as queue_error:
+            logger.warning("Failed to queue HTTP search query: %s", queue_error)
 
         return SearchResponse(
             query=search.query,

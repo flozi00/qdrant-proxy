@@ -4,12 +4,19 @@
  * Four search/ingest modes with result display, markdown preview, and feedback.
  * ============================================================================ */
 
-import { useCallback, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { marked } from 'marked';
-import { apiFetch, getAdminKey } from '../api/client';
+import { apiFetch } from '../api/client';
 import { mcpClient } from '../api/mcp';
 import { useApp } from '../store';
-import type { DocumentDetail, FAQEntry, SearchDocument } from '../types';
+import type {
+  DocumentDetail,
+  FAQEntry,
+  LLMDocumentRankingHint,
+  LLMRankDocumentOption,
+  LLMSearchRankingResponse,
+  SearchDocument,
+} from '../types';
 import { urlToDocId } from '../utils';
 import { FAQEntryDisplay, Modal, StarRating } from './ui';
 
@@ -32,6 +39,187 @@ interface GenerateFAQResponse {
   question: string;
   answer: string;
   duplicates: DuplicateCandidate[];
+}
+
+interface QueryMatchSummary {
+  phrase: string;
+  phraseCount: number;
+  termCounts: Record<string, number>;
+  totalTermHits: number;
+  bestChain: { text: string; count: number; length: number } | null;
+}
+
+interface QueuedQuery {
+  id: string;
+  query: string;
+  source: string;
+  created_at: string;
+}
+
+type MatchFilterMode = 'word' | 'chain' | 'word_or_chain';
+
+function escapeRegex(text: string): string {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function parseQueryTerms(query: string): string[] {
+  return query
+    .split(/\s+/)
+    .map((t) => t.trim())
+    .filter(Boolean)
+    .map((t) => t.replace(/^[^\p{L}\p{N}]+|[^\p{L}\p{N}]+$/gu, ''))
+    .filter(Boolean);
+}
+
+function countOccurrences(haystack: string, needle: string): number {
+  const source = haystack.trim();
+  const target = needle.trim();
+  if (!source || !target) return 0;
+  const regex = new RegExp(escapeRegex(target), 'gi');
+  return source.match(regex)?.length || 0;
+}
+
+function analyzeQueryMatches(query: string, text: string): QueryMatchSummary {
+  const phrase = query.trim();
+  const terms = parseQueryTerms(phrase);
+  const uniqueTerms = Array.from(new Set(terms.map((t) => t.toLowerCase())));
+  const phraseCount = countOccurrences(text, phrase);
+  const termCounts = uniqueTerms.reduce<Record<string, number>>((acc, term) => {
+    acc[term] = countOccurrences(text, term);
+    return acc;
+  }, {});
+
+  let bestChain: QueryMatchSummary['bestChain'] = null;
+  for (let chainLength = terms.length; chainLength >= 2; chainLength -= 1) {
+    let chainFound = false;
+    for (let i = 0; i <= terms.length - chainLength; i += 1) {
+      const chain = terms.slice(i, i + chainLength).join(' ').trim();
+      const chainCount = countOccurrences(text, chain);
+      if (chainCount > 0) {
+        bestChain = {
+          text: chain,
+          count: chainCount,
+          length: chainLength,
+        };
+        chainFound = true;
+        break;
+      }
+    }
+    if (chainFound) break;
+  }
+
+  const totalTermHits = Object.values(termCounts).reduce((sum, count) => sum + count, 0);
+
+  return {
+    phrase,
+    phraseCount,
+    termCounts,
+    totalTermHits,
+    bestChain,
+  };
+}
+
+function highlightByQuery(text: string, query: string): ReactNode[] {
+  const phrase = query.trim();
+  const terms = parseQueryTerms(phrase);
+  const patterns = Array.from(
+    new Set([
+      ...(phrase ? [phrase] : []),
+      ...terms,
+    ]),
+  )
+    .filter(Boolean)
+    .sort((a, b) => b.length - a.length);
+
+  if (!patterns.length || !text) return [text];
+
+  const regex = new RegExp(`(${patterns.map((p) => escapeRegex(p)).join('|')})`, 'gi');
+  return text.split(regex).map((part, idx) => {
+    if (idx % 2 === 1) {
+      return (
+        <mark key={`${part}-${idx}`} className="bg-yellow-200 text-gray-900 px-0.5 rounded-sm">
+          {part}
+        </mark>
+      );
+    }
+    return part;
+  });
+}
+
+function buildHighlightPatterns(query: string): string[] {
+  const phrase = query.trim();
+  const terms = parseQueryTerms(phrase);
+  return Array.from(
+    new Set([
+      ...(phrase ? [phrase] : []),
+      ...terms,
+    ]),
+  )
+    .filter(Boolean)
+    .sort((a, b) => b.length - a.length);
+}
+
+function highlightMarkdownHtmlByQuery(html: string, query: string): string {
+  const patterns = buildHighlightPatterns(query);
+  if (!html || patterns.length === 0 || typeof document === 'undefined') return html;
+
+  const regex = new RegExp(`(${patterns.map((p) => escapeRegex(p)).join('|')})`, 'gi');
+  const template = document.createElement('template');
+  template.innerHTML = html;
+
+  const walker = document.createTreeWalker(template.content, NodeFilter.SHOW_TEXT);
+  const textNodes: Text[] = [];
+  let current = walker.nextNode();
+  while (current) {
+    textNodes.push(current as Text);
+    current = walker.nextNode();
+  }
+
+  textNodes.forEach((textNode) => {
+    const source = textNode.nodeValue || '';
+    if (!source.trim() || !regex.test(source)) {
+      regex.lastIndex = 0;
+      return;
+    }
+    regex.lastIndex = 0;
+
+    const parts = source.split(regex);
+    if (parts.length <= 1) return;
+
+    const fragment = document.createDocumentFragment();
+    parts.forEach((part, idx) => {
+      if (!part) return;
+      if (idx % 2 === 1) {
+        const mark = document.createElement('mark');
+        mark.className = 'bg-yellow-200 text-gray-900 px-0.5 rounded-sm';
+        mark.textContent = part;
+        fragment.appendChild(mark);
+      } else {
+        fragment.appendChild(document.createTextNode(part));
+      }
+    });
+
+    textNode.parentNode?.replaceChild(fragment, textNode);
+  });
+
+  return template.innerHTML;
+}
+
+function passesMatchFilter(
+  summary: QueryMatchSummary,
+  mode: MatchFilterMode,
+  minCountInclusive: number,
+): boolean {
+  if (minCountInclusive <= 0) return true;
+  const maxWordCount = Object.values(summary.termCounts).reduce(
+    (max, count) => (count > max ? count : max),
+    0,
+  );
+  const chainCount = Math.max(summary.phraseCount, summary.bestChain?.count || 0);
+
+  if (mode === 'word') return maxWordCount >= minCountInclusive;
+  if (mode === 'chain') return chainCount >= minCountInclusive;
+  return maxWordCount >= minCountInclusive || chainCount >= minCountInclusive;
 }
 
 export default function SearchTab() {
@@ -92,6 +280,15 @@ function KnowledgeBaseSearch() {
   const [hasResults, setHasResults] = useState(false);
   const [docModalOpen, setDocModalOpen] = useState(false);
   const [docDetail, setDocDetail] = useState<DocumentDetail | null>(null);
+  const [minMatchCount, setMinMatchCount] = useState(0);
+  const [matchFilterMode, setMatchFilterMode] = useState<MatchFilterMode>('word_or_chain');
+  const [queuedQueries, setQueuedQueries] = useState<QueuedQuery[]>([]);
+  const [selectedQueueId, setSelectedQueueId] = useState('');
+  const [queueLoading, setQueueLoading] = useState(false);
+  const [llmHintsById, setLlmHintsById] = useState<Record<string, LLMDocumentRankingHint>>({});
+  const [llmHintModel, setLlmHintModel] = useState('');
+  const [llmHintsLoading, setLlmHintsLoading] = useState(false);
+  const [llmHintsError, setLlmHintsError] = useState('');
   const lastQuery = useRef('');
 
   // FAQ generation state for preview panel
@@ -104,22 +301,95 @@ function KnowledgeBaseSearch() {
   const [previewSubmitting, setPreviewSubmitting] = useState(false);
   const [previewSubmitStatus, setPreviewSubmitStatus] = useState('');
 
-  const search = useCallback(async () => {
-    if (!query.trim()) return;
-    lastQuery.current = query.trim();
+  const search = useCallback(async (overrideQuery?: string) => {
+    const effectiveQuery = (overrideQuery ?? query).trim();
+    if (!effectiveQuery) return;
+    lastQuery.current = effectiveQuery;
     try {
       const result = await mcpClient.callTool<{ faqs?: FAQEntry[]; documents?: SearchDocument[] }>(
         'search_knowledge_base',
-        { query: query.trim(), limit, collection_name: currentCollection || undefined },
+        { query: effectiveQuery, limit, collection_name: currentCollection || undefined },
       );
+      const resultDocs = result?.documents || [];
+      setQuery(effectiveQuery);
       setFaqs(result?.faqs || []);
-      setDocs(result?.documents || []);
+      setDocs(resultDocs);
+      setLlmHintsById({});
+      setLlmHintModel('');
+      setLlmHintsError('');
       setHasResults(true);
       setPreviewContent('');
+
+      if (resultDocs.length > 0) {
+        setLlmHintsLoading(true);
+        const options: LLMRankDocumentOption[] = resultDocs.map((doc, idx) => ({
+          option_id: doc.doc_id || doc.url || `doc-${idx + 1}`,
+          doc_id: doc.doc_id,
+          url: doc.url,
+          content: doc.content,
+          search_score: doc.score,
+        }));
+
+        try {
+          const ranking = await apiFetch<LLMSearchRankingResponse>('/admin/search/llm-rank', {
+            method: 'POST',
+            body: JSON.stringify({
+              query: effectiveQuery,
+              documents: options,
+            }),
+          });
+          const nextHints: Record<string, LLMDocumentRankingHint> = {};
+          for (const hint of ranking.hints || []) {
+            nextHints[hint.option_id] = hint;
+          }
+          setLlmHintsById(nextHints);
+          setLlmHintModel(ranking.model || '');
+        } catch (err) {
+          setLlmHintsError(err instanceof Error ? err.message : String(err));
+        } finally {
+          setLlmHintsLoading(false);
+        }
+      }
     } catch (err) {
       alert('Search failed: ' + (err instanceof Error ? err.message : err));
+      setLlmHintsLoading(false);
     }
-  }, [query, limit, hybrid]);
+  }, [query, limit, hybrid, currentCollection]);
+
+  const loadQueuedQueries = useCallback(async () => {
+    setQueueLoading(true);
+    try {
+      const res = await apiFetch<{ items?: QueuedQuery[] }>(
+        `/admin/query-queue?collection_name=${encodeURIComponent(currentCollection || '')}&limit=100`,
+      );
+      setQueuedQueries(res.items || []);
+    } catch {
+      setQueuedQueries([]);
+    } finally {
+      setQueueLoading(false);
+    }
+  }, [currentCollection]);
+
+  useEffect(() => {
+    void loadQueuedQueries();
+  }, [loadQueuedQueries]);
+
+  const replaySelectedQuery = useCallback(async () => {
+    if (!selectedQueueId) return;
+    const selected = queuedQueries.find((item) => item.id === selectedQueueId);
+    if (!selected) return;
+
+    try {
+      await search(selected.query);
+      await apiFetch(`/admin/query-queue/${encodeURIComponent(selected.id)}`, {
+        method: 'DELETE',
+      });
+      setSelectedQueueId('');
+      await loadQueuedQueries();
+    } catch (err) {
+      alert('Replay failed: ' + (err instanceof Error ? err.message : err));
+    }
+  }, [selectedQueueId, queuedQueries, search, loadQueuedQueries]);
 
   const openPreview = (doc: SearchDocument) => {
     setPreviewContent(doc.content);
@@ -157,6 +427,22 @@ function KnowledgeBaseSearch() {
     }
   };
 
+  const filteredFaqs = useMemo(() => {
+    if (!lastQuery.current.trim() || minMatchCount <= 0) return faqs;
+    return faqs.filter((faq) => {
+      const summary = analyzeQueryMatches(lastQuery.current, `${faq.question}\n${faq.answer}`);
+      return passesMatchFilter(summary, matchFilterMode, minMatchCount);
+    });
+  }, [faqs, minMatchCount, matchFilterMode]);
+
+  const filteredDocs = useMemo(() => {
+    if (!lastQuery.current.trim() || minMatchCount <= 0) return docs;
+    return docs.filter((doc) => {
+      const summary = analyzeQueryMatches(lastQuery.current, doc.content || '');
+      return passesMatchFilter(summary, matchFilterMode, minMatchCount);
+    });
+  }, [docs, minMatchCount, matchFilterMode]);
+
   return (
     <>
       {/* Search input */}
@@ -169,7 +455,7 @@ function KnowledgeBaseSearch() {
           className="w-full px-6 py-4 text-lg border-2 border-gray-300 rounded-full focus:border-blue-500 focus:outline-none shadow-sm hover:shadow-md transition-shadow"
           placeholder="Search documents and FAQ entries..."
         />
-        <button onClick={search} className="absolute right-2 top-1/2 transform -translate-y-1/2 btn-primary px-6 py-2 rounded-full">
+        <button onClick={() => void search()} className="absolute right-2 top-1/2 transform -translate-y-1/2 btn-primary px-6 py-2 rounded-full">
           Search
         </button>
       </div>
@@ -193,18 +479,93 @@ function KnowledgeBaseSearch() {
         </label>
       </div>
 
+      <div className="mt-3 p-3 bg-gray-50 border border-gray-200 rounded-lg">
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="text-sm font-medium text-gray-700">Queued Replay Queries</span>
+          <button
+            onClick={() => void loadQueuedQueries()}
+            className="text-xs px-2 py-1 border rounded bg-white hover:bg-gray-100"
+          >
+            Refresh
+          </button>
+          {queueLoading && <span className="text-xs text-gray-500">Loading...</span>}
+        </div>
+        <div className="mt-2 flex flex-wrap gap-2 items-center">
+          <select
+            value={selectedQueueId}
+            onChange={(e) => setSelectedQueueId(e.target.value)}
+            className="min-w-[320px] max-w-full px-2 py-1 border rounded bg-white text-sm"
+          >
+            <option value="">Select queued query...</option>
+            {queuedQueries.map((item) => (
+              <option key={item.id} value={item.id}>
+                {item.query} ({item.source})
+              </option>
+            ))}
+          </select>
+          <button
+            onClick={() => void replaySelectedQuery()}
+            disabled={!selectedQueueId}
+            className="btn-primary text-xs disabled:opacity-50"
+          >
+            Replay And Remove
+          </button>
+        </div>
+      </div>
+
+      <div className="mt-3 flex flex-wrap items-center gap-3 text-sm text-gray-600">
+        <span className="font-medium text-gray-700">Match filter</span>
+        <span className="text-gray-500">Show only when count &gt;= X</span>
+        <label className="flex items-center gap-2">
+          <span className="text-gray-600">X</span>
+          <input
+            type="number"
+            min={0}
+            value={minMatchCount}
+            onChange={(e) => setMinMatchCount(Math.max(0, parseInt(e.target.value) || 0))}
+            className="w-20 px-2 py-1 border rounded"
+          />
+        </label>
+        <select
+          value={matchFilterMode}
+          onChange={(e) => setMatchFilterMode(e.target.value as MatchFilterMode)}
+          className="px-2 py-1 border rounded bg-white"
+        >
+          <option value="word_or_chain">Word OR chain</option>
+          <option value="word">Word only</option>
+          <option value="chain">Chain only</option>
+        </select>
+        {hasResults && minMatchCount > 0 && (
+          <span className="text-xs text-gray-500">
+            FAQ: {filteredFaqs.length}/{faqs.length}, Docs: {filteredDocs.length}/{docs.length}
+          </span>
+        )}
+      </div>
+
+      {hasResults && (
+        <div className="mt-2 text-xs text-gray-500">
+          {llmHintsLoading && <span>LLM rating hints are being generated...</span>}
+          {!llmHintsLoading && llmHintModel && (
+            <span>LLM hint model: <code>{llmHintModel}</code></span>
+          )}
+          {!llmHintsLoading && llmHintsError && (
+            <span className="text-amber-700">LLM hints unavailable: {llmHintsError}</span>
+          )}
+        </div>
+      )}
+
       {/* Results */}
       {hasResults && (
         <div className="flex flex-col md:flex-row gap-6 items-start mt-6">
           {/* Left: results list */}
           <div className="w-full md:w-1/2 space-y-6">
             {/* FAQ Entries */}
-            {faqs.length > 0 && (
+            {filteredFaqs.length > 0 && (
               <div className="bg-blue-50 border-l-4 border-blue-500 rounded-lg shadow-sm p-6">
                 <h3 className="text-lg font-semibold text-blue-900 mb-4">FAQ Entries</h3>
                 <div className="space-y-3">
-                  {faqs.map((faq, i) => (
-                    <FAQResult key={faq.id || i} faq={faq} searchQuery={lastQuery.current} />
+                  {filteredFaqs.map((faq, i) => (
+                    <FAQResult key={`${lastQuery.current}:${faq.id || i}`} faq={faq} searchQuery={lastQuery.current} />
                   ))}
                 </div>
               </div>
@@ -213,12 +574,18 @@ function KnowledgeBaseSearch() {
             {/* Documents */}
             <div>
               <h3 className="text-lg font-semibold text-gray-800 mb-4">Documents</h3>
-              {docs.length === 0 ? (
+              {filteredDocs.length === 0 ? (
                 <p className="text-gray-600 text-center py-8">No documents found.</p>
               ) : (
                 <div className="space-y-4">
-                  {docs.map((doc, i) => (
-                    <DocResult key={doc.doc_id || i} doc={doc} onPreview={openPreview} searchQuery={lastQuery.current} />
+                  {filteredDocs.map((doc, i) => (
+                    <DocResult
+                      key={`${lastQuery.current}:${doc.doc_id || i}`}
+                      doc={doc}
+                      onPreview={openPreview}
+                      searchQuery={lastQuery.current}
+                      llmHint={llmHintsById[doc.doc_id || doc.url || `doc-${i + 1}`]}
+                    />
                   ))}
                 </div>
               )}
@@ -283,7 +650,11 @@ function KnowledgeBaseSearch() {
                 }}
               >
                 {previewContent ? (
-                  <div dangerouslySetInnerHTML={{ __html: marked.parse(previewContent) as string }} />
+                  <div
+                    dangerouslySetInnerHTML={{
+                      __html: highlightMarkdownHtmlByQuery(marked.parse(previewContent) as string, lastQuery.current),
+                    }}
+                  />
                 ) : (
                   <div className="flex flex-col items-center justify-center h-full text-gray-400 py-20">
                     <p>Select a result to preview its content here.</p>
@@ -444,6 +815,16 @@ function KnowledgeBaseSearch() {
 function FAQResult({ faq, searchQuery }: { faq: FAQEntry; searchQuery: string }) {
   const [feedbackStatus, setFeedbackStatus] = useState('');
   const [disabled, setDisabled] = useState(false);
+  const searchableText = `${faq.question}\n${faq.answer}`;
+  const matchSummary = useMemo(
+    () => analyzeQueryMatches(searchQuery, searchableText),
+    [searchQuery, searchableText],
+  );
+
+  useEffect(() => {
+    setFeedbackStatus('');
+    setDisabled(false);
+  }, [searchQuery]);
 
   const submitFeedback = async (rating: number, rank?: number) => {
     if (!searchQuery) return;
@@ -469,8 +850,28 @@ function FAQResult({ faq, searchQuery }: { faq: FAQEntry; searchQuery: string })
 
   return (
     <div className="bg-white p-4 rounded border-l-4 border-blue-400">
-      <FAQEntryDisplay question={faq.question} answer={faq.answer} />
+      <div className="flex flex-col gap-1">
+        <div className="font-medium text-gray-700 break-words">Q: {highlightByQuery(faq.question, searchQuery)}</div>
+        <div className="text-gray-600 break-words">A: {highlightByQuery(faq.answer, searchQuery)}</div>
+      </div>
       {faq.score != null && <span className="ml-auto text-xs text-gray-500 float-right">Score: {faq.score.toFixed(3)}</span>}
+      {(matchSummary.totalTermHits > 0 || matchSummary.phraseCount > 0) && (
+        <div className="mt-2 text-xs text-gray-700 flex flex-wrap gap-2">
+          <span className="px-2 py-0.5 rounded bg-amber-100 text-amber-900">
+            Phrase: {matchSummary.phraseCount}
+          </span>
+          {Object.entries(matchSummary.termCounts).map(([term, count]) => (
+            <span key={term} className="px-2 py-0.5 rounded bg-sky-100 text-sky-900">
+              {term}: {count}
+            </span>
+          ))}
+          {matchSummary.bestChain && (
+            <span className="px-2 py-0.5 rounded bg-emerald-100 text-emerald-900">
+              Best chain ({matchSummary.bestChain.length} words): {matchSummary.bestChain.count}
+            </span>
+          )}
+        </div>
+      )}
       {faq.source_documents && faq.source_documents.length > 0 && (
         <div className="mt-2 text-xs text-gray-500">
           Sources:{' '}
@@ -517,13 +918,29 @@ function DocResult({
   doc,
   onPreview,
   searchQuery,
+  llmHint,
 }: {
   doc: SearchDocument;
   onPreview: (doc: SearchDocument) => void;
   searchQuery: string;
+  llmHint?: LLMDocumentRankingHint;
 }) {
   const [feedbackStatus, setFeedbackStatus] = useState('');
   const [disabled, setDisabled] = useState(false);
+  const matchSummary = useMemo(
+    () => analyzeQueryMatches(searchQuery, doc.content || ''),
+    [searchQuery, doc.content],
+  );
+  const previewText = useMemo(() => {
+    if (!doc.content) return '';
+    if (doc.content.length <= 300) return doc.content;
+    return `${doc.content.substring(0, 300)}...`;
+  }, [doc.content]);
+
+  useEffect(() => {
+    setFeedbackStatus('');
+    setDisabled(false);
+  }, [searchQuery]);
 
   const submitFeedback = async (rating: number, rank?: number) => {
     if (!searchQuery) return;
@@ -553,21 +970,48 @@ function DocResult({
   return (
     <div className="bg-white p-4 rounded-lg shadow-sm border hover:shadow-md transition-shadow">
       <div className="flex justify-between items-start mb-2 gap-4">
-        <a href={doc.url} target="_blank" rel="noreferrer" className="text-lg font-semibold text-blue-600 hover:underline block truncate flex-1 min-w-0">
+        <a href={doc.url} target="_blank" rel="noreferrer" className="text-lg font-semibold text-blue-600 hover:underline block break-all flex-1 min-w-0">
           {doc.url}
         </a>
         <span className="text-xs px-2 py-1 bg-gray-100 text-gray-600 rounded flex-shrink-0">
           Score: {doc.score.toFixed(3)}
         </span>
       </div>
-      <p className="text-sm text-gray-700 mb-2">
-        {doc.content.substring(0, 300)}
-        {doc.content.length > 300 && '...'}
+      {(matchSummary.totalTermHits > 0 || matchSummary.phraseCount > 0) && (
+        <div className="mb-2 text-xs text-gray-700 flex flex-wrap gap-2">
+          <span className="px-2 py-0.5 rounded bg-amber-100 text-amber-900">
+            Phrase: {matchSummary.phraseCount}
+          </span>
+          {Object.entries(matchSummary.termCounts).map(([term, count]) => (
+            <span key={term} className="px-2 py-0.5 rounded bg-sky-100 text-sky-900">
+              {term}: {count}
+            </span>
+          ))}
+          {matchSummary.bestChain && (
+            <span className="px-2 py-0.5 rounded bg-emerald-100 text-emerald-900">
+              Best chain ({matchSummary.bestChain.length} words): {matchSummary.bestChain.count}
+            </span>
+          )}
+        </div>
+      )}
+      <p className="text-sm text-gray-700 mb-2 break-words overflow-hidden">
+        {highlightByQuery(previewText, searchQuery)}
       </p>
       <div className="flex gap-3 items-center">
         <button onClick={() => onPreview(doc)} className="btn-primary text-xs">Preview</button>
         <a href={doc.url} target="_blank" rel="noreferrer" className="text-sm text-blue-600 hover:underline">Open Link</a>
       </div>
+
+      {llmHint && (
+        <div className="mt-3 p-2 rounded border border-indigo-200 bg-indigo-50 text-xs text-indigo-900">
+          <div className="font-semibold">
+            LLM rating hint: {'★'.repeat(Math.max(1, Math.min(5, llmHint.stars)))}{'☆'.repeat(5 - Math.max(1, Math.min(5, llmHint.stars)))}
+            {' '}({llmHint.stars}/5), rank #{llmHint.relative_rank}
+          </div>
+          <div className="mt-1 text-indigo-800">{llmHint.reason}</div>
+          <div className="mt-1 text-indigo-700">Use this as orientation for your manual star feedback below.</div>
+        </div>
+      )}
 
       {/* Feedback row */}
       <div className="mt-3 flex items-center gap-2 border-t pt-2 flex-wrap">

@@ -30,14 +30,14 @@ class Settings(BaseSettings):
 
     # Dense Embedding Configuration
     dense_model_name: str = Field(
-        default="Qwen/Qwen3-Embedding-0.6B", alias="DENSE_MODEL_NAME"
+        default="Qwen/Qwen3-Embedding-4B", alias="DENSE_MODEL_NAME"
     )
     dense_vector_size: int = Field(
         default=1024, alias="DENSE_VECTOR_SIZE",
         description="Fallback dense vector size; auto-detected from endpoint at startup"
     )
     dense_embedding_url: str = Field(
-        default="http://vllm-embedding:9091/v1", alias="DENSE_EMBEDDING_URL"
+        default="http://vllm-embedding-4b:9093/v1", alias="DENSE_EMBEDDING_URL"
     )
 
     # ColBERT Embedding Configuration
@@ -55,6 +55,9 @@ class Settings(BaseSettings):
         default="http://localhost:4000/v1", alias="LITELLM_BASE_URL"
     )
     litellm_api_key: str = Field(default="", alias="OPENAI_API_KEY")
+    llm_ranking_model: str = Field(
+        default="gemini/gemini-3.1-pro-preview", alias="LLM_RANKING_MODEL"
+    )
 
     # Admin API Configuration
     qdrant_proxy_admin_key: str = Field(default="", alias="QDRANT_PROXY_ADMIN_KEY")

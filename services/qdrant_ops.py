@@ -9,7 +9,6 @@ Provides functions for:
 import logging
 from typing import Any, Optional
 
-from config import settings
 from qdrant_client import QdrantClient, models
 
 from utils.timings import linetimer
@@ -144,8 +143,57 @@ def get_feedback_collection_name(base_collection: str) -> str:
     return f"{base_collection}_feedback"
 
 
+def _get_collection_dense_dim(
+    client: QdrantClient,
+    collection_name: str,
+) -> Optional[int]:
+    """Return dense vector size configured for an existing collection."""
+    try:
+        info = client.get_collection(collection_name)
+        vectors = info.config.params.vectors
+        if isinstance(vectors, dict):
+            dense_cfg = vectors.get("dense")
+            return dense_cfg.size if dense_cfg else None
+        if hasattr(vectors, "size"):
+            return vectors.size
+    except Exception:
+        return None
+    return None
+
+
+def _ensure_feedback_payload_indexes(
+    client: QdrantClient,
+    feedback_collection: str,
+) -> None:
+    """Ensure payload indexes exist for feedback collection."""
+    for field_name in [
+        "faq_id",
+        "user_rating",
+        "ranking_score",
+        "collection_name",
+        "created_at",
+    ]:
+        try:
+            schema_type = models.PayloadSchemaType.KEYWORD
+            if field_name in ("user_rating", "ranking_score"):
+                schema_type = models.PayloadSchemaType.INTEGER
+            elif field_name == "created_at":
+                schema_type = models.PayloadSchemaType.DATETIME
+
+            client.create_payload_index(
+                collection_name=feedback_collection,
+                field_name=field_name,
+                field_schema=schema_type,
+            )
+        except Exception:
+            pass
+
+
 @linetimer()
-def ensure_feedback_collection(base_collection: str) -> None:
+def ensure_feedback_collection(
+    base_collection: str,
+    dense_vector_size: Optional[int] = None,
+) -> None:
     """Initialize Qdrant collection for search quality feedback if it doesn't exist.
 
     This collection stores:
@@ -154,40 +202,49 @@ def ensure_feedback_collection(base_collection: str) -> None:
     - Quality metrics for human review (no auto-adjustments)
     """
     client = _get_qdrant_client()
+    from state import get_app_state as _get_state
+
     feedback_collection = get_feedback_collection_name(base_collection)
+    target_dense_dim = dense_vector_size or _get_state().dense_vector_size
 
     try:
         if client.collection_exists(feedback_collection):
-            logger.debug(f"Feedback collection '{feedback_collection}' already exists")
-            return
+            current_dense_dim = _get_collection_dense_dim(client, feedback_collection)
+            if current_dense_dim == target_dense_dim:
+                logger.debug(
+                    "Feedback collection '%s' already exists with dense dim %s",
+                    feedback_collection,
+                    current_dense_dim,
+                )
+                _ensure_feedback_payload_indexes(client, feedback_collection)
+                return
 
-        logger.info(f"Creating feedback collection '{feedback_collection}'...")
+            logger.warning(
+                "Feedback collection '%s' has dense dim %s but expected %s; recreating collection",
+                feedback_collection,
+                current_dense_dim,
+                target_dense_dim,
+            )
+            client.delete_collection(collection_name=feedback_collection)
+
+        logger.info(
+            "Creating feedback collection '%s' (dense dim: %s)...",
+            feedback_collection,
+            target_dense_dim,
+        )
 
         client.create_collection(
             collection_name=feedback_collection,
             vectors_config=build_feedback_dense_vectors_config(
-                dense_vector_size=settings.dense_vector_size
+                dense_vector_size=target_dense_dim
             ),
         )
 
-        # Create payload indexes for fast lookups
-        for field_name in ["faq_id", "user_rating", "ranking_score", "collection_name", "created_at"]:
-            try:
-                schema_type = models.PayloadSchemaType.KEYWORD
-                if field_name in ("user_rating", "ranking_score"):
-                    schema_type = models.PayloadSchemaType.INTEGER
-                elif field_name == "created_at":
-                    schema_type = models.PayloadSchemaType.DATETIME
-
-                client.create_payload_index(
-                    collection_name=feedback_collection,
-                    field_name=field_name,
-                    field_schema=schema_type,
-                )
-            except Exception:
-                pass
-
-        logger.info(f"Feedback collection '{feedback_collection}' created successfully")
+        _ensure_feedback_payload_indexes(client, feedback_collection)
+        logger.info(
+            "Feedback collection '%s' created successfully",
+            feedback_collection,
+        )
 
     except Exception as e:
         logger.error(

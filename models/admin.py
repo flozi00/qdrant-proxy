@@ -91,3 +91,40 @@ class FinalizeMigrationRequest(BaseModel):
 
     collection_name: str = Field(..., description="The alias/collection name that was migrated")
     delete_old: bool = Field(default=False, description="Delete the old collection after swap")
+
+
+class LLMRankDocumentOption(BaseModel):
+    """Document option passed to LLM for relative ranking."""
+
+    option_id: str = Field(..., description="Stable option ID used to match ranking output")
+    doc_id: Optional[str] = Field(None, description="Document ID")
+    url: str = Field(..., description="Document URL")
+    content: str = Field(..., description="Document content snippet")
+    search_score: float = Field(..., description="Original Qdrant search score")
+
+
+class LLMSearchRankingRequest(BaseModel):
+    """Request payload for LLM-based search result ranking hints."""
+
+    query: str = Field(..., min_length=1, description="User search query")
+    documents: List[LLMRankDocumentOption] = Field(
+        default_factory=list,
+        description="All search result documents to rank against each other",
+    )
+
+
+class LLMDocumentRankingHint(BaseModel):
+    """LLM-generated ranking hint for a single document option."""
+
+    option_id: str = Field(..., description="Option ID from request")
+    stars: int = Field(..., ge=1, le=5, description="Suggested 1-5 star relevance")
+    relative_rank: int = Field(..., ge=1, description="Relative ranking among all options")
+    reason: str = Field(..., description="Short rationale for the suggestion")
+
+
+class LLMSearchRankingResponse(BaseModel):
+    """Response payload for LLM-based search ranking hints."""
+
+    query: str
+    model: str
+    hints: List[LLMDocumentRankingHint] = Field(default_factory=list)

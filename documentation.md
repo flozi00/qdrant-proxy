@@ -1,5 +1,7 @@
 # Qdrant Proxy Server Documentation
 
+> This project is developed by primeLine Solutions and contributed to the [LLM4KMU project](https://llm4kmu.de/).
+
 > Documentation has been migrated to the [`docs/`](docs/) folder for better organization.
 
 ## Quick Links

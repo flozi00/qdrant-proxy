@@ -49,6 +49,7 @@ Document collections ensure payload indexes for `metadata.indexed_at`, `metadata
 | `GET` | `/admin/documents/{id}` | Document details + FAQ entries |
 | `POST` | `/admin/documents/generate-faq` | LLM-generate Q&A from selected text + find duplicates |
 | `POST` | `/admin/documents/submit-faq` | Submit reviewed FAQ (create new or merge into existing) |
+| `POST` | `/admin/search/llm-rank` | LLM score/rank hints (1-5 stars + reason) for search results |
 | `GET` | `/admin/facts` | List FAQ entries |
 | `POST` | `/admin/gc/documents` | Garbage collect old documents |
 | `POST` | `/admin/gc/facts` | Garbage collect orphaned FAQ entries |
@@ -64,7 +65,7 @@ The admin UI (`/admin`) is a React + TypeScript SPA built with Vite and Tailwind
 
 **Tabs:**
 
-1. **Search** — Knowledge base search with side-by-side markdown preview and 👍/👎/★ feedback. The preview panel and document detail modal support **text selection → LLM FAQ generation** with duplicate detection and merge capability.
+1. **Search** — Knowledge base search with side-by-side markdown preview and 👍/👎/★ feedback. The preview panel and document detail modal support **text selection → LLM FAQ generation** with duplicate detection and merge capability. Document cards also show an **LLM-based rating hint** (relative rank, 1-5 stars, reason) to help users calibrate manual star feedback.
 2. **FAQ / KV** — Collection selector, CRUD interface, semantic search with score threshold, per-result feedback.
 3. **Quality Feedback** — Search feedback stats/recommendations/failure patterns, FAQ quality sub-tab, feedback list with filters, contrastive training data export.
 4. **Maintenance** — Read-only embedding model info, blue-green re-embedding with collection dropdown.

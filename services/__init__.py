@@ -54,3 +54,9 @@ from .qdrant_ops import (
     get_faq_collection_name,
     get_feedback_collection_name,
 )
+from .query_queue import (
+    delete_queued_query,
+    enqueue_query,
+    ensure_query_queue_collection,
+    list_queued_queries,
+)

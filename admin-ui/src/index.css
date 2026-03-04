@@ -45,6 +45,10 @@ body {
 .btn-success:hover { background-color: #16a34a; }
 
 /* --- Markdown content --- */
+.markdown-content {
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
 .markdown-content h1 { font-size: 1.5rem; font-weight: bold; margin-top: 1rem; margin-bottom: 0.5rem; }
 .markdown-content h2 { font-size: 1.25rem; font-weight: bold; margin-top: 0.75rem; margin-bottom: 0.5rem; }
 .markdown-content h3 { font-size: 1.125rem; font-weight: bold; margin-top: 0.5rem; margin-bottom: 0.25rem; }
@@ -59,3 +63,11 @@ body {
 .markdown-content table { border-collapse: collapse; width: 100%; margin-bottom: 1rem; }
 .markdown-content th, .markdown-content td { border: 1px solid #d1d5db; padding: 0.5rem; text-align: left; }
 .markdown-content th { background-color: #f3f4f6; }
+
+/* Keep code blocks horizontally scrollable instead of breaking formatting. */
+.markdown-content pre,
+.markdown-content pre code {
+  overflow-wrap: normal;
+  word-break: normal;
+  white-space: pre;
+}

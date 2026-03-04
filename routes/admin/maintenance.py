@@ -12,7 +12,10 @@ Migration flow (per Qdrant docs):
 """
 
 import asyncio
+import fcntl
 import logging
+import os
+import tempfile
 from datetime import datetime
 from typing import Any, List, Optional, Tuple
 
@@ -46,6 +49,157 @@ from services import (
 )
 
 router = APIRouter()
+
+
+def _get_collection_dense_dim(qdrant_client, collection_name: str) -> Optional[int]:
+    """Return the dense vector dimension configured in a Qdrant collection, or None."""
+    try:
+        info = qdrant_client.get_collection(collection_name)
+        vectors = info.config.params.vectors
+        if isinstance(vectors, dict) and "dense" in vectors:
+            return vectors["dense"].size
+        if hasattr(vectors, "size"):
+            return vectors.size
+    except Exception:
+        pass
+    return None
+
+
+async def finalize_migration_internal(
+    alias_name: str,
+    delete_old: bool = True,
+) -> None:
+    """Programmatic finalize (no HTTP context needed)."""
+    app_state = get_app_state()
+    qdrant_client = app_state.qdrant_client
+
+    matching_task = None
+    for _key, task in app_state.maintenance_tasks.items():
+        if (
+            task.get("alias_name") == alias_name
+            and task.get("status") == "awaiting_finalize"
+        ):
+            matching_task = task
+            break
+
+    if matching_task is None:
+        logger.warning("No awaiting_finalize task for '%s'; skipping auto-finalize", alias_name)
+        return
+
+    source_collection = matching_task["source_collection"]
+    target_collection = matching_task["target_collection"]
+
+    if not qdrant_client.collection_exists(target_collection):
+        logger.error("Migration target '%s' disappeared; cannot finalize", target_collection)
+        return
+
+    existing_alias_target = None
+    for alias in qdrant_client.get_aliases().aliases:
+        if alias.alias_name == alias_name:
+            existing_alias_target = alias.collection_name
+            break
+
+    if existing_alias_target:
+        qdrant_client.update_collection_aliases(
+            change_aliases_operations=[
+                models.DeleteAliasOperation(
+                    delete_alias=models.DeleteAlias(alias_name=alias_name)
+                ),
+                models.CreateAliasOperation(
+                    create_alias=models.CreateAlias(
+                        collection_name=target_collection,
+                        alias_name=alias_name,
+                    )
+                ),
+            ]
+        )
+        if delete_old and existing_alias_target != target_collection:
+            qdrant_client.delete_collection(existing_alias_target)
+            logger.info("Deleted old collection '%s'", existing_alias_target)
+    else:
+        if qdrant_client.collection_exists(alias_name):
+            if delete_old:
+                qdrant_client.delete_collection(alias_name)
+            else:
+                logger.warning(
+                    "Cannot auto-finalize '%s': real collection exists and delete_old=False",
+                    alias_name,
+                )
+                return
+        qdrant_client.update_collection_aliases(
+            change_aliases_operations=[
+                models.CreateAliasOperation(
+                    create_alias=models.CreateAlias(
+                        collection_name=target_collection,
+                        alias_name=alias_name,
+                    )
+                ),
+            ]
+        )
+
+    matching_task["status"] = "finalized"
+    matching_task["finalized_at"] = datetime.now().isoformat()
+    logger.info("Auto-finalized migration: alias '%s' → '%s'", alias_name, target_collection)
+
+
+async def check_and_reembed_dimension_mismatches() -> None:
+    """Scan all collections at startup; auto re-embed any whose dense dim differs from the current model.
+
+    Uses a file lock so only one uvicorn worker performs the migration when
+    running with multiple workers.
+    """
+    lock_path = os.path.join(tempfile.gettempdir(), "qdrant_proxy_reembed.lock")
+    lock_fd = None
+    try:
+        lock_fd = open(lock_path, "w")
+        fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        # Another worker already holds the lock — skip silently
+        if lock_fd:
+            lock_fd.close()
+        return
+
+    try:
+        app_state = get_app_state()
+        qdrant_client = app_state.qdrant_client
+        expected_dim = app_state.dense_vector_size
+
+        if qdrant_client is None or expected_dim is None:
+            return
+
+        collections_to_process = _resolve_collections_to_process(qdrant_client)
+        mismatched: List[str] = []
+
+        for coll_name in collections_to_process:
+            actual_dim = _get_collection_dense_dim(qdrant_client, coll_name)
+            if actual_dim is not None and actual_dim != expected_dim:
+                mismatched.append(coll_name)
+
+        if not mismatched:
+            return
+
+        logger.warning(
+            "Startup dimension mismatch detected (expected %d): %s — starting auto re-embed + finalize",
+            expected_dim,
+            mismatched,
+        )
+
+        for coll_name in mismatched:
+            if _has_active_maintenance_task(coll_name, ["dense"]):
+                continue
+            try:
+                await rearchive_collection(coll_name, batch_size=8, vector_types=["dense"])
+                await finalize_migration_internal(coll_name, delete_old=True)
+            except Exception as exc:
+                logger.error("Auto re-embed failed for '%s': %s", coll_name, exc)
+    finally:
+        if lock_fd:
+            fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            lock_fd.close()
+            try:
+                os.unlink(lock_path)
+            except OSError:
+                pass
 
 
 def _resolve_collections_to_process(

@@ -74,6 +74,7 @@ from state import get_app_state
 from services import (
     encode_dense,
     encode_document,
+    enqueue_query,
     ensure_collection,
     ensure_feedback_collection,
     get_faq_collection_name,
@@ -319,6 +320,10 @@ async def lifespan(app: FastAPI):
 
     logger.info("Qdrant Proxy Server ready")
 
+    # Check for dense dimension mismatches and auto re-embed if needed
+    from routes.admin.maintenance import check_and_reembed_dimension_mismatches
+    reembed_task = asyncio.create_task(check_and_reembed_dimension_mismatches())
+
     # Start memory cleanup task
     cleanup_task = asyncio.create_task(periodic_memory_cleanup())
 
@@ -327,12 +332,13 @@ async def lifespan(app: FastAPI):
     # Shutdown
     logger.info("Shutting down Qdrant Proxy Server...")
 
-    # Cancel cleanup task
-    cleanup_task.cancel()
-    try:
-        await cleanup_task
-    except asyncio.CancelledError:
-        pass
+    # Cancel background tasks
+    for task in (reembed_task, cleanup_task):
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
 
     if qdrant_client:
         qdrant_client.close()
@@ -477,6 +483,15 @@ async def search_knowledge_base(
         "faqs": faqs,
         "documents": documents,
     }
+
+    try:
+        enqueue_query(
+            query=query,
+            source="qdrant_mcp_search",
+            collection_name=target_collection,
+        )
+    except Exception as queue_error:
+        logger.warning("Failed to queue MCP search query: %s", queue_error)
 
     if normalized_allowed_domains:
         response["applied_allowed_domains"] = normalized_allowed_domains
@@ -2006,9 +2021,6 @@ async def submit_feedback(
     target_collection = feedback.collection_name or settings.collection_name
     feedback_collection = get_feedback_collection_name(target_collection)
 
-    # Ensure feedback collection exists
-    ensure_feedback_collection(target_collection)
-
     # Validate that either FAQ or document fields are provided
     if feedback.content_type == "faq":
         if not feedback.faq_id or not feedback.faq_text:
@@ -2035,6 +2047,12 @@ async def submit_feedback(
 
         # Generate embedding for query (for pattern analysis)
         query_embedding = await encode_dense(feedback.query)
+
+        # Ensure feedback collection exists with the current embedding dimension.
+        ensure_feedback_collection(
+            target_collection,
+            dense_vector_size=len(query_embedding),
+        )
 
         # Build payload based on content type
         payload = {

@@ -6,6 +6,7 @@ Provides:
 """
 
 import logging
+from json import JSONDecodeError, dumps, loads
 from typing import List, Optional
 
 from auth import verify_admin_auth
@@ -16,6 +17,8 @@ from knowledge_graph import (
     FeedbackResponse,
     FeedbackStatsResponse,
 )
+from models import LLMSearchRankingRequest, LLMSearchRankingResponse
+from openai import AsyncOpenAI
 
 logger = logging.getLogger(__name__)
 from qdrant_client import models
@@ -28,11 +31,164 @@ router = APIRouter()
 COLLECTION_NAME = settings.collection_name
 
 
+def _clamp_stars(value: int) -> int:
+    return max(1, min(5, value))
+
+
 # ============================================================================
 # SEARCH FEEDBACK ENDPOINTS
 # ============================================================================
 # Note: POST /feedback is defined in app.py for end-user access (no admin auth)
 # This module only handles admin-protected feedback management endpoints
+
+
+@router.post("/search/llm-rank", response_model=LLMSearchRankingResponse)
+async def llm_rank_search_results(
+    body: LLMSearchRankingRequest,
+    _: bool = Depends(verify_admin_auth),
+):
+    """Generate LLM-based star rating hints for search result documents.
+
+    The model receives all result options in one prompt and returns relative
+    ranking + a short reason per option so users can calibrate manual rating.
+    """
+    options = body.documents
+    if not options:
+        return LLMSearchRankingResponse(query=body.query, model=settings.llm_ranking_model, hints=[])
+
+    client = AsyncOpenAI(
+        base_url=settings.litellm_base_url,
+        api_key=settings.litellm_api_key,
+    )
+
+    compact_options = []
+    for item in options:
+        compact_options.append(
+            {
+                "option_id": item.option_id,
+                "doc_id": item.doc_id,
+                "url": item.url,
+                "search_score": item.search_score,
+                "content": item.content[:1600],
+            }
+        )
+
+    response_schema = {
+        "name": "search_ranking_hints",
+        "strict": True,
+        "schema": {
+            "type": "object",
+            "properties": {
+                "hints": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "option_id": {"type": "string"},
+                            "stars": {"type": "integer", "minimum": 1, "maximum": 5},
+                            "relative_rank": {"type": "integer", "minimum": 1},
+                            "reason": {"type": "string"},
+                        },
+                        "required": ["option_id", "stars", "relative_rank", "reason"],
+                        "additionalProperties": False,
+                    },
+                }
+            },
+            "required": ["hints"],
+            "additionalProperties": False,
+        },
+    }
+
+    try:
+        completion = await client.chat.completions.create(
+            model=settings.llm_ranking_model,
+            temperature=0.1,
+            max_tokens=2200,
+            response_format={
+                "type": "json_schema",
+                "json_schema": response_schema,
+            },
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "You evaluate search result relevance. "
+                        "Given one query and multiple candidate documents, score each candidate with 1-5 stars. "
+                        "Rank candidates relative to each other where rank 1 is best. "
+                        "Return concise reasons that mention relevance, specificity, and evidence from content."
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": (
+                        f"Query:\n{body.query}\n\n"
+                        "Candidate options (JSON array):\n"
+                        f"{dumps(compact_options, ensure_ascii=True)}\n\n"
+                        "Return one hint per option_id. "
+                        "Use stars=5 only for clearly excellent matches and stars=1 for poor/off-topic results."
+                    ),
+                },
+            ],
+        )
+    except Exception as exc:
+        logger.error(f"LLM ranking failed for query '{body.query}': {exc}")
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"LLM ranking failed: {exc}",
+        )
+
+    raw_content = (completion.choices[0].message.content or "").strip()
+    try:
+        parsed = loads(raw_content) if raw_content else {"hints": []}
+    except JSONDecodeError as exc:
+        logger.error(f"Failed parsing LLM ranking output: {exc}; content={raw_content[:400]}")
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="LLM ranking returned invalid JSON",
+        )
+
+    parsed_hints = parsed.get("hints", []) if isinstance(parsed, dict) else []
+    hints_by_id = {}
+    for hint in parsed_hints:
+        if not isinstance(hint, dict):
+            continue
+        option_id = str(hint.get("option_id", "")).strip()
+        if not option_id:
+            continue
+        try:
+            stars = _clamp_stars(int(hint.get("stars", 3)))
+        except (TypeError, ValueError):
+            stars = 3
+        try:
+            rank = max(1, int(hint.get("relative_rank", 1)))
+        except (TypeError, ValueError):
+            rank = 1
+        reason = str(hint.get("reason", "")).strip() or "No reason provided"
+        hints_by_id[option_id] = {
+            "option_id": option_id,
+            "stars": stars,
+            "relative_rank": rank,
+            "reason": reason[:400],
+        }
+
+    # Guarantee one hint per option, preserving input order.
+    normalized_hints = []
+    for idx, option in enumerate(options, start=1):
+        hint = hints_by_id.get(option.option_id)
+        if hint is None:
+            hint = {
+                "option_id": option.option_id,
+                "stars": 3,
+                "relative_rank": idx,
+                "reason": "Fallback hint: this result appears moderately relevant.",
+            }
+        normalized_hints.append(hint)
+
+    return LLMSearchRankingResponse(
+        query=body.query,
+        model=settings.llm_ranking_model,
+        hints=normalized_hints,
+    )
 
 
 @router.get("/feedback", response_model=List[FeedbackResponse])

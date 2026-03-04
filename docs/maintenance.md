@@ -95,7 +95,7 @@ Embedding model IDs are stored persistently in a dedicated Qdrant collection cal
 | Setting | Default | Description |
 |---------|---------|-------------|
 | `colbert_model_id` | `VAGOsolutions/SauerkrautLM-Multi-ModernColBERT` | ColBERT model served by vLLM (env: `COLBERT_MODEL_NAME`) |
-| `dense_model_id` | `Qwen/Qwen3-Embedding-0.6B` | Dense model ID served by vLLM (env: `DENSE_MODEL_NAME`) |
+| `dense_model_id` | `Qwen/Qwen3-Embedding-4B` | Dense model ID served by vLLM (env: `DENSE_MODEL_NAME`) |
 | `dense_vector_size` | (auto-detected) | Auto-detected from OpenAI-compatible endpoint at startup |
 
 Updates to these settings via the API are saved to Qdrant. The dense vector dimension is automatically probed from the embedding endpoint during model initialization.

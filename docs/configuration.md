@@ -8,8 +8,8 @@ See `.env.example` for a complete reference with descriptions.
 |----------|-------------|---------|
 | `QDRANT_URL` | Qdrant server URL | `http://localhost:6333` |
 | `COLLECTION_NAME` | Default collection | `documents` |
-| `DENSE_MODEL_NAME` | Dense embedding model name | `Qwen/Qwen3-Embedding-0.6B` |
-| `DENSE_EMBEDDING_URL` | vLLM embedding server URL | `http://vllm-embedding:9091/v1` |
+| `DENSE_MODEL_NAME` | Dense embedding model name | `Qwen/Qwen3-Embedding-4B` |
+| `DENSE_EMBEDDING_URL` | vLLM embedding server URL | `http://vllm-embedding-4b:9093/v1` |
 | `DENSE_VECTOR_SIZE` | Fallback dense vector dimension (auto-detected from endpoint) | `1024` |
 | `COLBERT_MODEL_NAME` | ColBERT model served by vLLM | `VAGOsolutions/SauerkrautLM-Multi-ModernColBERT` |
 | `COLBERT_EMBEDDING_URL` | vLLM ColBERT pooling server URL | `http://vllm-colbert:9092` |
@@ -40,7 +40,7 @@ fastmcp>=3.0.0b1
 |---------|---------|-------------|
 | Qdrant | Vector database storage | `http://qdrant:6333` |
 | LiteLLM | LLM inference for picture description API | `http://localhost:4000/v1` |
-| vLLM (Dense) | Dense embedding server (Qwen3-Embedding) | `http://vllm-embedding:9091/v1` |
+| vLLM (Dense) | Dense embedding server (Qwen3-Embedding) | `http://vllm-embedding-4b:9093/v1` |
 | vLLM (ColBERT) | ColBERT multivector embedding server (ModernColBERT) | `http://vllm-colbert:9092` |
 
 ## Deployment

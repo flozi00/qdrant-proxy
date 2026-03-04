@@ -67,6 +67,27 @@ export interface SearchDocument {
   score: number;
 }
 
+export interface LLMRankDocumentOption {
+  option_id: string;
+  doc_id?: string;
+  url: string;
+  content: string;
+  search_score: number;
+}
+
+export interface LLMDocumentRankingHint {
+  option_id: string;
+  stars: number;
+  relative_rank: number;
+  reason: string;
+}
+
+export interface LLMSearchRankingResponse {
+  query: string;
+  model: string;
+  hints: LLMDocumentRankingHint[];
+}
+
 export interface WebSearchResult {
   url: string;
   title: string;
