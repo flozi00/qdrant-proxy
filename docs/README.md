@@ -2,6 +2,8 @@
 
 > **Version**: 2.0.0 · **Port**: 8002 · **Location**: `services/qdrant-proxy/`
 
+> This project is developed by primeLine Solutions and contributed to the [LLM4KMU project](https://llm4kmu.de/).
+
 ---
 
 ## 1. Project Overview
