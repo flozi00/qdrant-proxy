@@ -76,6 +76,13 @@ class SearchFeedbackCreate(BaseModel):
         le=5,
         description="Relative ranking score (1-5) for graded relevance.",
     )
+    rating_session_id: Optional[str] = Field(
+        None,
+        description=(
+            "Session identifier for a batch of ratings from the same search run. "
+            "Used to avoid mixing relative star labels across different index states."
+        ),
+    )
     content_type: str = Field(
         "faq",
         description="Type of content: 'faq' or 'document'",
@@ -104,6 +111,7 @@ class FeedbackResponse(BaseModel):
     search_score: float
     user_rating: int
     ranking_score: Optional[int] = None
+    rating_session_id: Optional[str] = None
     content_type: str = "faq"
     collection_name: str
     created_at: str

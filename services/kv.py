@@ -355,6 +355,7 @@ def ensure_kv_feedback_collection(collection_name: str) -> str:
             ("kv_id", models.PayloadSchemaType.KEYWORD),
             ("user_rating", models.PayloadSchemaType.INTEGER),
             ("ranking_score", models.PayloadSchemaType.INTEGER),
+            ("rating_session_id", models.PayloadSchemaType.KEYWORD),
             ("collection_name", models.PayloadSchemaType.KEYWORD),
             ("created_at", models.PayloadSchemaType.DATETIME),
         ]:
@@ -382,6 +383,7 @@ async def submit_kv_feedback(
     search_score: float,
     user_rating: int,
     ranking_score: Optional[int] = None,
+    rating_session_id: Optional[str] = None,
 ) -> Dict:
     """Submit feedback on a KV search result.
 
@@ -416,6 +418,7 @@ async def submit_kv_feedback(
         "search_score": search_score,
         "user_rating": user_rating,
         "ranking_score": ranking_score,
+        "rating_session_id": rating_session_id,
         "collection_name": collection_name,
         "created_at": timestamp,
     }
@@ -441,6 +444,7 @@ async def submit_kv_feedback(
 def list_kv_feedback(
     collection_name: str,
     user_rating: Optional[int] = None,
+    rating_session_id: Optional[str] = None,
     limit: int = 100,
 ) -> List[Dict]:
     """List feedback records for a KV collection."""
@@ -456,6 +460,13 @@ def list_kv_feedback(
             conditions.append(
                 models.FieldCondition(
                     key="user_rating", match=models.MatchValue(value=user_rating)
+                )
+            )
+        if rating_session_id:
+            conditions.append(
+                models.FieldCondition(
+                    key="rating_session_id",
+                    match=models.MatchValue(value=rating_session_id),
                 )
             )
         scroll_filter = models.Filter(must=conditions) if conditions else None
@@ -480,6 +491,7 @@ def export_kv_feedback(
     collection_name: str,
     format: str = "contrastive",
     include_neutral: bool = False,
+    rating_session_id: Optional[str] = None,
 ) -> Dict:
     """Export KV feedback as contrastive training pairs for embedding fine-tuning.
 
@@ -516,8 +528,16 @@ def export_kv_feedback(
         if not offset:
             break
 
+    scoped_feedback = all_feedback
+    if rating_session_id:
+        scoped_feedback = [
+            f
+            for f in all_feedback
+            if f.payload.get("rating_session_id") == rating_session_id
+        ]
+
     positives, negatives = [], []
-    for f in all_feedback:
+    for f in scoped_feedback:
         p = f.payload
         rating = p.get("user_rating", 0)
         if not include_neutral and rating == 0:
@@ -531,6 +551,7 @@ def export_kv_feedback(
             "search_score": p.get("search_score", 0.0),
             "user_rating": rating,
             "ranking_score": p.get("ranking_score"),
+            "rating_session_id": p.get("rating_session_id"),
         }
         if rating == 1:
             positives.append(record)
@@ -539,7 +560,7 @@ def export_kv_feedback(
 
     if format == "jsonl":
         all_records = []
-        for f in all_feedback:
+        for f in scoped_feedback:
             p = f.payload
             text = f"Key: {p.get('kv_key', '')}\nValue: {p.get('kv_value', '')}"
             all_records.append({
@@ -548,10 +569,11 @@ def export_kv_feedback(
                 "search_score": p.get("search_score", 0.0),
                 "user_rating": p.get("user_rating", 0),
                 "ranking_score": p.get("ranking_score"),
+                "rating_session_id": p.get("rating_session_id"),
             })
         return {
             "format": format,
-            "total_records": len(all_feedback),
+            "total_records": len(all_records),
             "positive_pairs": len(positives),
             "negative_pairs": len(negatives),
             "contrastive_pairs": 0,
@@ -564,42 +586,47 @@ def export_kv_feedback(
     ranked_by_query: Dict[str, List[Dict]] = {}
 
     for rec in positives:
-        positive_by_query.setdefault(rec["query"], []).append(rec)
+        key = f"{rec['query']}::{rec.get('rating_session_id') or 'legacy'}"
+        positive_by_query.setdefault(key, []).append(rec)
     for rec in negatives:
-        negative_by_query.setdefault(rec["query"], []).append(rec)
+        key = f"{rec['query']}::{rec.get('rating_session_id') or 'legacy'}"
+        negative_by_query.setdefault(key, []).append(rec)
     for rec in positives + negatives:
         if rec.get("ranking_score") is not None:
-            ranked_by_query.setdefault(rec["query"], []).append(rec)
+            key = f"{rec['query']}::{rec.get('rating_session_id') or 'legacy'}"
+            ranked_by_query.setdefault(key, []).append(rec)
 
     contrastive_pairs = []
 
     # 1) Binary pairs: positive vs negative for same query
-    for query in positive_by_query:
-        if query in negative_by_query:
-            for pos in positive_by_query[query]:
-                for neg in negative_by_query[query]:
+    for query_session_key in positive_by_query:
+        if query_session_key in negative_by_query:
+            for pos in positive_by_query[query_session_key]:
+                for neg in negative_by_query[query_session_key]:
                     contrastive_pairs.append({
-                        "query": query,
+                        "query": pos["query"],
                         "positive": pos["text"],
                         "negative": neg["text"],
                         "positive_score": pos["search_score"],
                         "negative_score": neg["search_score"],
+                        "rating_session_id": pos.get("rating_session_id"),
                         "pair_source": "binary",
                         "score_gap": None,
                     })
 
     # 2) Ranked pairs: higher ranking_score vs lower ranking_score
-    for query, records in ranked_by_query.items():
+    for _, records in ranked_by_query.items():
         sorted_recs = sorted(records, key=lambda r: r["ranking_score"], reverse=True)
         for i, higher in enumerate(sorted_recs):
             for lower in sorted_recs[i + 1:]:
                 if higher["ranking_score"] > lower["ranking_score"]:
                     contrastive_pairs.append({
-                        "query": query,
+                        "query": higher["query"],
                         "positive": higher["text"],
                         "negative": lower["text"],
                         "positive_score": higher["search_score"],
                         "negative_score": lower["search_score"],
+                        "rating_session_id": higher.get("rating_session_id"),
                         "pair_source": "ranked",
                         "score_gap": higher["ranking_score"] - lower["ranking_score"],
                     })
@@ -609,7 +636,7 @@ def export_kv_feedback(
 
     return {
         "format": format,
-        "total_records": len(all_feedback),
+        "total_records": len(scoped_feedback),
         "positive_pairs": len(positives),
         "negative_pairs": len(negatives),
         "contrastive_pairs": len(contrastive_pairs),

@@ -83,8 +83,8 @@ Admin UI search uses the MCP tool `search_knowledge_base`. The UI initializes an
 | `DELETE` | `/kv/{collection_name}/{entry_id}` | Delete entry |
 | `POST` | `/kv/{collection_name}/search` | Semantic search |
 | `POST` | `/kv/{collection_name}/feedback` | Submit binary/star feedback on a search result |
-| `GET` | `/kv/{collection_name}/feedback` | List feedback records (filterable by `user_rating`) |
-| `GET` | `/kv/{collection_name}/feedback/export` | Export feedback as contrastive pairs or JSONL |
+| `GET` | `/kv/{collection_name}/feedback` | List feedback records (filterable by `user_rating`, `rating_session_id`) |
+| `GET` | `/kv/{collection_name}/feedback/export` | Export feedback as contrastive pairs or JSONL (optional `rating_session_id`) |
 | `DELETE` | `/kv/{collection_name}/feedback/{id}` | Delete a feedback record |
 
 All KV REST endpoints require admin authentication.
@@ -107,9 +107,9 @@ See [Maintenance](maintenance.md) for detailed re-embedding documentation.
 | Method | Endpoint | Description |
 |--------|----------|-------------|
 | `POST` | `/feedback` | Submit user feedback (FAQ entries or documents) |
-| `GET` | `/admin/feedback` | List feedback records with filters |
-| `GET` | `/admin/feedback/stats` | Quality metrics + recommendations |
-| `GET` | `/admin/feedback/export` | Export training data |
+| `GET` | `/admin/feedback` | List feedback records with filters (`user_rating`, `rating_session_id`) |
+| `GET` | `/admin/feedback/stats` | Quality metrics + recommendations (optional `rating_session_id`) |
+| `GET` | `/admin/feedback/export` | Export training data (optional `rating_session_id`) |
 | `DELETE` | `/admin/feedback/{id}` | Delete feedback record |
 | `POST` | `/admin/feedback/judge` | Trigger LLM quality assessment |
 

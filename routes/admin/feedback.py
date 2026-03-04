@@ -197,6 +197,7 @@ async def list_feedback(
     limit: int = 100,
     offset: Optional[str] = None,
     user_rating: Optional[int] = None,
+    rating_session_id: Optional[str] = None,
     _: bool = Depends(verify_admin_auth),
 ):
     """List feedback records with optional filters."""
@@ -216,6 +217,13 @@ async def list_feedback(
                 models.FieldCondition(
                     key="user_rating",
                     match=models.MatchValue(value=user_rating),
+                )
+            )
+        if rating_session_id:
+            filter_conditions.append(
+                models.FieldCondition(
+                    key="rating_session_id",
+                    match=models.MatchValue(value=rating_session_id),
                 )
             )
 
@@ -247,6 +255,7 @@ async def list_feedback(
                     search_score=payload.get("search_score", 0.0),
                     user_rating=payload.get("user_rating", 0),
                     ranking_score=payload.get("ranking_score"),
+                    rating_session_id=payload.get("rating_session_id"),
                     content_type=payload.get("content_type", "faq"),
                     collection_name=payload.get("collection_name", ""),
                     created_at=payload.get("created_at", ""),
@@ -266,6 +275,7 @@ async def list_feedback(
 @router.get("/feedback/stats", response_model=FeedbackStatsResponse)
 async def get_feedback_stats(
     collection_name: Optional[str] = None,
+    rating_session_id: Optional[str] = None,
     _: bool = Depends(verify_admin_auth),
 ):
     """Get aggregated feedback statistics for quality assessment."""
@@ -301,6 +311,13 @@ async def get_feedback_stats(
 
             if not offset:
                 break
+
+        if rating_session_id:
+            all_feedback = [
+                f
+                for f in all_feedback
+                if f.payload.get("rating_session_id") == rating_session_id
+            ]
 
         total = len(all_feedback)
         positive = sum(1 for f in all_feedback if f.payload.get("user_rating", 0) == 1)
@@ -351,6 +368,7 @@ async def export_feedback(
     collection_name: Optional[str] = None,
     format: str = "contrastive",
     include_neutral: bool = False,
+    rating_session_id: Optional[str] = None,
     _: bool = Depends(verify_admin_auth),
 ):
     """Export feedback data for embedding model fine-tuning."""
@@ -387,10 +405,18 @@ async def export_feedback(
             if not offset:
                 break
 
+        scoped_feedback = all_feedback
+        if rating_session_id:
+            scoped_feedback = [
+                f
+                for f in all_feedback
+                if f.payload.get("rating_session_id") == rating_session_id
+            ]
+
         positives = []
         negatives = []
 
-        for f in all_feedback:
+        for f in scoped_feedback:
             payload = f.payload
             user_rating = payload.get("user_rating", 0)
 
@@ -410,6 +436,7 @@ async def export_feedback(
                 "search_score": payload.get("search_score", 0.0),
                 "user_rating": user_rating,
                 "ranking_score": payload.get("ranking_score"),
+                "rating_session_id": payload.get("rating_session_id"),
             }
 
             if user_rating == 1:
@@ -425,39 +452,42 @@ async def export_feedback(
             ranked_by_query = {}
 
             for p in positives:
-                q = p["query"]
-                if q not in positive_by_query:
-                    positive_by_query[q] = []
-                positive_by_query[q].append(p)
+                key = f"{p['query']}::{p.get('rating_session_id') or 'legacy'}"
+                if key not in positive_by_query:
+                    positive_by_query[key] = []
+                positive_by_query[key].append(p)
 
             for n in negatives:
-                q = n["query"]
-                if q not in negative_by_query:
-                    negative_by_query[q] = []
-                negative_by_query[q].append(n)
+                key = f"{n['query']}::{n.get('rating_session_id') or 'legacy'}"
+                if key not in negative_by_query:
+                    negative_by_query[key] = []
+                negative_by_query[key].append(n)
 
             # Collect all records that have a ranking_score for ranked pairs
             for record in positives + negatives:
                 if record.get("ranking_score") is not None:
-                    q = record["query"]
-                    if q not in ranked_by_query:
-                        ranked_by_query[q] = []
-                    ranked_by_query[q].append(record)
+                    key = (
+                        f"{record['query']}::{record.get('rating_session_id') or 'legacy'}"
+                    )
+                    if key not in ranked_by_query:
+                        ranked_by_query[key] = []
+                    ranked_by_query[key].append(record)
 
             # 1) Binary pairs: positive vs negative (existing logic)
-            for query in positive_by_query:
-                if query in negative_by_query:
-                    for pos in positive_by_query[query]:
-                        for neg in negative_by_query[query]:
+            for query_session_key in positive_by_query:
+                if query_session_key in negative_by_query:
+                    for pos in positive_by_query[query_session_key]:
+                        for neg in negative_by_query[query_session_key]:
                             contrastive_pairs.append(
                                 {
-                                    "query": query,
+                                    "query": pos["query"],
                                     "positive": pos["text"],
                                     "negative": neg["text"],
                                     "positive_type": pos["content_type"],
                                     "negative_type": neg["content_type"],
                                     "positive_score": pos["search_score"],
                                     "negative_score": neg["search_score"],
+                                    "rating_session_id": pos.get("rating_session_id"),
                                     "pair_source": "binary",
                                     "score_gap": None,
                                 }
@@ -465,7 +495,7 @@ async def export_feedback(
 
             # 2) Ranked pairs: higher ranking_score vs lower ranking_score
             #    This lets "good" results serve as hard negatives to "very good" results
-            for query, records in ranked_by_query.items():
+            for _, records in ranked_by_query.items():
                 # Sort by ranking_score descending
                 sorted_records = sorted(
                     records, key=lambda r: r["ranking_score"], reverse=True
@@ -475,13 +505,14 @@ async def export_feedback(
                         if higher["ranking_score"] > lower["ranking_score"]:
                             contrastive_pairs.append(
                                 {
-                                    "query": query,
+                                    "query": higher["query"],
                                     "positive": higher["text"],
                                     "negative": lower["text"],
                                     "positive_type": higher["content_type"],
                                     "negative_type": lower["content_type"],
                                     "positive_score": higher["search_score"],
                                     "negative_score": lower["search_score"],
+                                    "rating_session_id": higher.get("rating_session_id"),
                                     "pair_source": "ranked",
                                     "score_gap": higher["ranking_score"]
                                     - lower["ranking_score"],
@@ -493,7 +524,7 @@ async def export_feedback(
 
             return FeedbackExportResponse(
                 format=format,
-                total_records=len(all_feedback),
+                total_records=len(scoped_feedback),
                 positive_pairs=len(positives),
                 negative_pairs=len(negatives),
                 contrastive_pairs=len(contrastive_pairs),
@@ -504,7 +535,7 @@ async def export_feedback(
 
         elif format == "jsonl":
             all_records = []
-            for f in all_feedback:
+            for f in scoped_feedback:
                 payload = f.payload
                 content_type = payload.get("content_type", "faq")
                 text_content = (
@@ -520,12 +551,13 @@ async def export_feedback(
                         "search_score": payload.get("search_score", 0.0),
                         "user_rating": payload.get("user_rating", 0),
                         "ranking_score": payload.get("ranking_score"),
+                        "rating_session_id": payload.get("rating_session_id"),
                     }
                 )
 
             return FeedbackExportResponse(
                 format=format,
-                total_records=len(all_feedback),
+                total_records=len(scoped_feedback),
                 positive_pairs=len(positives),
                 negative_pairs=len(negatives),
                 contrastive_pairs=0,

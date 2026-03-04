@@ -67,6 +67,10 @@ class KVFeedbackRequest(BaseModel):
         None, ge=1, le=5,
         description="Star ranking (1-5) for graded relevance",
     )
+    rating_session_id: Optional[str] = Field(
+        None,
+        description="Session identifier for a single search/rating run",
+    )
 
 
 # ── Endpoints ──────────────────────────────────────────────────────────
@@ -159,6 +163,7 @@ async def http_submit_kv_feedback(
         search_score=body.search_score,
         user_rating=body.user_rating,
         ranking_score=body.ranking_score,
+        rating_session_id=body.rating_session_id,
     )
     return result
 
@@ -167,11 +172,17 @@ async def http_submit_kv_feedback(
 async def http_list_kv_feedback(
     collection_name: str,
     user_rating: Optional[int] = Query(None, ge=-1, le=1),
+    rating_session_id: Optional[str] = Query(None),
     limit: int = Query(100, ge=1, le=1000),
     _: bool = Depends(verify_admin_auth),
 ):
     """List feedback records for a KV collection."""
-    return list_kv_feedback(collection_name, user_rating=user_rating, limit=limit)
+    return list_kv_feedback(
+        collection_name,
+        user_rating=user_rating,
+        rating_session_id=rating_session_id,
+        limit=limit,
+    )
 
 
 @router.get("/{collection_name}/feedback/export")
@@ -179,10 +190,16 @@ async def http_export_kv_feedback(
     collection_name: str,
     format: str = Query("contrastive"),
     include_neutral: bool = Query(False),
+    rating_session_id: Optional[str] = Query(None),
     _: bool = Depends(verify_admin_auth),
 ):
     """Export KV feedback as contrastive training pairs or JSONL."""
-    return export_kv_feedback(collection_name, format=format, include_neutral=include_neutral)
+    return export_kv_feedback(
+        collection_name,
+        format=format,
+        include_neutral=include_neutral,
+        rating_session_id=rating_session_id,
+    )
 
 
 @router.delete("/{collection_name}/feedback/{feedback_id}")

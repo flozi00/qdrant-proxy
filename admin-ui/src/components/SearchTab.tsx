@@ -289,6 +289,7 @@ function KnowledgeBaseSearch() {
   const [llmHintModel, setLlmHintModel] = useState('');
   const [llmHintsLoading, setLlmHintsLoading] = useState(false);
   const [llmHintsError, setLlmHintsError] = useState('');
+  const [ratingSessionId, setRatingSessionId] = useState('');
   const lastQuery = useRef('');
 
   // FAQ generation state for preview panel
@@ -304,6 +305,8 @@ function KnowledgeBaseSearch() {
   const search = useCallback(async (overrideQuery?: string) => {
     const effectiveQuery = (overrideQuery ?? query).trim();
     if (!effectiveQuery) return;
+    const nextRatingSessionId = `search-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+    setRatingSessionId(nextRatingSessionId);
     lastQuery.current = effectiveQuery;
     try {
       const result = await mcpClient.callTool<{ faqs?: FAQEntry[]; documents?: SearchDocument[] }>(
@@ -565,7 +568,12 @@ function KnowledgeBaseSearch() {
                 <h3 className="text-lg font-semibold text-blue-900 mb-4">FAQ Entries</h3>
                 <div className="space-y-3">
                   {filteredFaqs.map((faq, i) => (
-                    <FAQResult key={`${lastQuery.current}:${faq.id || i}`} faq={faq} searchQuery={lastQuery.current} />
+                    <FAQResult
+                      key={`${lastQuery.current}:${faq.id || i}`}
+                      faq={faq}
+                      searchQuery={lastQuery.current}
+                      ratingSessionId={ratingSessionId}
+                    />
                   ))}
                 </div>
               </div>
@@ -584,6 +592,7 @@ function KnowledgeBaseSearch() {
                       doc={doc}
                       onPreview={openPreview}
                       searchQuery={lastQuery.current}
+                      ratingSessionId={ratingSessionId}
                       llmHint={llmHintsById[doc.doc_id || doc.url || `doc-${i + 1}`]}
                     />
                   ))}
@@ -812,7 +821,15 @@ function KnowledgeBaseSearch() {
 /* FAQ search result with feedback                                            */
 /* -------------------------------------------------------------------------- */
 
-function FAQResult({ faq, searchQuery }: { faq: FAQEntry; searchQuery: string }) {
+function FAQResult({
+  faq,
+  searchQuery,
+  ratingSessionId,
+}: {
+  faq: FAQEntry;
+  searchQuery: string;
+  ratingSessionId?: string;
+}) {
   const [feedbackStatus, setFeedbackStatus] = useState('');
   const [disabled, setDisabled] = useState(false);
   const searchableText = `${faq.question}\n${faq.answer}`;
@@ -840,6 +857,7 @@ function FAQResult({ faq, searchQuery }: { faq: FAQEntry; searchQuery: string })
         content_type: 'faq',
       };
       if (rank != null) body.ranking_score = rank;
+      if (ratingSessionId) body.rating_session_id = ratingSessionId;
       await apiFetch('/feedback', { method: 'POST', body: JSON.stringify(body) });
       setFeedbackStatus(rank != null ? `✓ Ranked ${rank}/5` : rating === 1 ? '✓ Relevant' : '✓ Irrelevant');
     } catch {
@@ -918,11 +936,13 @@ function DocResult({
   doc,
   onPreview,
   searchQuery,
+  ratingSessionId,
   llmHint,
 }: {
   doc: SearchDocument;
   onPreview: (doc: SearchDocument) => void;
   searchQuery: string;
+  ratingSessionId?: string;
   llmHint?: LLMDocumentRankingHint;
 }) {
   const [feedbackStatus, setFeedbackStatus] = useState('');
@@ -959,6 +979,7 @@ function DocResult({
         content_type: 'document',
       };
       if (rank != null) body.ranking_score = rank;
+      if (ratingSessionId) body.rating_session_id = ratingSessionId;
       await apiFetch('/feedback', { method: 'POST', body: JSON.stringify(body) });
       setFeedbackStatus(rank != null ? `✓ Ranked ${rank}/5` : rating === 1 ? '✓ Relevant' : '✓ Irrelevant');
     } catch {

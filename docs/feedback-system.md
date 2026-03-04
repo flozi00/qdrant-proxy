@@ -58,6 +58,7 @@ flowchart TB
 | `search_score` | float | Score from search at rating time |
 | `user_rating` | int | 1 (relevant), 0 (neutral), -1 (irrelevant) |
 | `ranking_score` | int (optional) | 1–5 relative ranking score for graded relevance |
+| `rating_session_id` | string (optional) | Session/run ID that scopes relative star labels to one search session |
 | `content_type` | string | "faq" or "document" |
 | `created_at` | datetime | When feedback was submitted |
 
@@ -97,6 +98,7 @@ Feedback collections follow the pattern: `{collection}_feedback` (e.g., `my-coll
 ```json
 {
   "query": "h200 vram gpu nvidia",
+  "rating_session_id": "search-1741101000000-ab12cd34",
   "faq_id": "faq_123",
   "faq_text": "NVIDIA H200 GPU has 141GB HBM3e VRAM.",
   "search_score": 29.5,
@@ -111,6 +113,7 @@ Feedback collections follow the pattern: `{collection}_feedback` (e.g., `my-coll
 ```json
 {
   "query": "h200 vram gpu nvidia",
+  "rating_session_id": "search-1741101000000-ab12cd34",
   "doc_id": "doc_nvidia_h200_specs",
   "doc_url": "https://nvidia.com/h200-specs",
   "doc_content": "The NVIDIA H200 Tensor Core GPU delivers exceptional performance...",
@@ -175,8 +178,10 @@ Export feedback data for model fine-tuning.
 
 **Parameters:**
 - `format`: `contrastive` (triplets) or `jsonl` (flat records)
-- `min_confidence`: Minimum LLM confidence for inclusion (default: 0.7)
 - `collection_name`: Optional collection filter
+- `rating_session_id`: Optional rating-session filter
+
+Contrastive pairing is built within `(query, rating_session_id)` buckets. This prevents old ratings from one index state being paired with ratings from later index states.
 
 **Contrastive Format Response:**
 ```json

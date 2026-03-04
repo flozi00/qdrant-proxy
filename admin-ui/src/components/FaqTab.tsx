@@ -20,6 +20,7 @@ export default function FaqTab() {
   const [isSearchResult, setIsSearchResult] = useState(false);
   const [resultCount, setResultCount] = useState('');
   const [newCollName, setNewCollName] = useState('');
+  const [ratingSessionId, setRatingSessionId] = useState('');
 
   // Modal state
   const [modalOpen, setModalOpen] = useState(false);
@@ -71,6 +72,8 @@ export default function FaqTab() {
     }
     setLoading(true);
     try {
+      const nextRatingSessionId = `faq-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+      setRatingSessionId(nextRatingSessionId);
       const data = await apiFetch<{ results: KVEntry[] }>(`/kv/${encodeURIComponent(selected)}/search`, {
         method: 'POST',
         body: JSON.stringify({ query: searchQuery.trim(), limit: 50, score_threshold: scoreThreshold }),
@@ -255,6 +258,7 @@ export default function FaqTab() {
               entry={entry}
               showScore={isSearchResult}
               searchQuery={searchQuery}
+              ratingSessionId={ratingSessionId}
               collection={selected}
               onEdit={() => openEdit(entry.id)}
               onDelete={() => deleteEntry(entry.id)}
@@ -303,6 +307,7 @@ function KVEntryCard({
   entry,
   showScore,
   searchQuery,
+  ratingSessionId,
   collection,
   onEdit,
   onDelete,
@@ -310,6 +315,7 @@ function KVEntryCard({
   entry: KVEntry;
   showScore: boolean;
   searchQuery: string;
+  ratingSessionId?: string;
   collection: string;
   onEdit: () => void;
   onDelete: () => void;
@@ -331,6 +337,7 @@ function KVEntryCard({
         user_rating: rating,
       };
       if (rank != null) body.ranking_score = rank;
+      if (ratingSessionId) body.rating_session_id = ratingSessionId;
       await apiFetch(`/kv/${encodeURIComponent(collection)}/feedback`, {
         method: 'POST',
         body: JSON.stringify(body),

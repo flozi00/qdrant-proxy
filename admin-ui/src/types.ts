@@ -122,6 +122,7 @@ export interface FeedbackResponse {
   search_score: number;
   user_rating: number;
   ranking_score?: number;
+  rating_session_id?: string;
   content_type: string;
   collection_name: string;
   created_at: string;

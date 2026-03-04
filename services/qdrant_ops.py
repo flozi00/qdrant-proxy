@@ -170,6 +170,7 @@ def _ensure_feedback_payload_indexes(
         "faq_id",
         "user_rating",
         "ranking_score",
+        "rating_session_id",
         "collection_name",
         "created_at",
     ]:
