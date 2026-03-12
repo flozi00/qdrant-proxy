@@ -12,11 +12,13 @@ from typing import Dict, List, Optional
 
 from qdrant_client import QdrantClient, models
 from services.qdrant_ops import (
-    build_feedback_dense_vectors_config,
     build_hybrid_vectors_config,
+    ensure_dense_only_aux_collection,
 )
 
 from utils.timings import linetimer
+
+from .feedback_pairs import build_contrastive_pairs
 
 logger = logging.getLogger(__name__)
 
@@ -341,32 +343,20 @@ def ensure_kv_feedback_collection(collection_name: str) -> str:
 
     dense_vector_size = get_app_state().dense_vector_size
 
-    if client.collection_exists(fb_col):
-        return fb_col
-
     try:
-        client.create_collection(
+        ensure_dense_only_aux_collection(
             collection_name=fb_col,
-            vectors_config=build_feedback_dense_vectors_config(
-                dense_vector_size=dense_vector_size,
-            ),
+            dense_vector_size=dense_vector_size,
+            payload_indexes=[
+                ("kv_id", models.PayloadSchemaType.KEYWORD),
+                ("user_rating", models.PayloadSchemaType.INTEGER),
+                ("ranking_score", models.PayloadSchemaType.INTEGER),
+                ("rating_session_id", models.PayloadSchemaType.KEYWORD),
+                ("collection_name", models.PayloadSchemaType.KEYWORD),
+                ("created_at", models.PayloadSchemaType.DATETIME),
+            ],
+            client=client,
         )
-        for field, schema in [
-            ("kv_id", models.PayloadSchemaType.KEYWORD),
-            ("user_rating", models.PayloadSchemaType.INTEGER),
-            ("ranking_score", models.PayloadSchemaType.INTEGER),
-            ("rating_session_id", models.PayloadSchemaType.KEYWORD),
-            ("collection_name", models.PayloadSchemaType.KEYWORD),
-            ("created_at", models.PayloadSchemaType.DATETIME),
-        ]:
-            try:
-                client.create_payload_index(
-                    collection_name=fb_col, field_name=field, field_schema=schema
-                )
-            except Exception:
-                pass
-
-        logger.info(f"Created KV feedback collection {fb_col}")
     except Exception as e:
         logger.error(f"Failed to create KV feedback collection {fb_col}: {e}")
         raise
@@ -536,7 +526,9 @@ def export_kv_feedback(
             if f.payload.get("rating_session_id") == rating_session_id
         ]
 
-    positives, negatives = [], []
+    records = []
+    positive_count = 0
+    negative_count = 0
     for f in scoped_feedback:
         p = f.payload
         rating = p.get("user_rating", 0)
@@ -553,10 +545,11 @@ def export_kv_feedback(
             "ranking_score": p.get("ranking_score"),
             "rating_session_id": p.get("rating_session_id"),
         }
+        records.append(record)
         if rating == 1:
-            positives.append(record)
+            positive_count += 1
         elif rating == -1:
-            negatives.append(record)
+            negative_count += 1
 
     if format == "jsonl":
         all_records = []
@@ -574,62 +567,13 @@ def export_kv_feedback(
         return {
             "format": format,
             "total_records": len(all_records),
-            "positive_pairs": len(positives),
-            "negative_pairs": len(negatives),
+            "positive_pairs": positive_count,
+            "negative_pairs": negative_count,
             "contrastive_pairs": 0,
             "data": all_records,
         }
 
-    # Contrastive format: build pairs
-    positive_by_query: Dict[str, List[Dict]] = {}
-    negative_by_query: Dict[str, List[Dict]] = {}
-    ranked_by_query: Dict[str, List[Dict]] = {}
-
-    for rec in positives:
-        key = f"{rec['query']}::{rec.get('rating_session_id') or 'legacy'}"
-        positive_by_query.setdefault(key, []).append(rec)
-    for rec in negatives:
-        key = f"{rec['query']}::{rec.get('rating_session_id') or 'legacy'}"
-        negative_by_query.setdefault(key, []).append(rec)
-    for rec in positives + negatives:
-        if rec.get("ranking_score") is not None:
-            key = f"{rec['query']}::{rec.get('rating_session_id') or 'legacy'}"
-            ranked_by_query.setdefault(key, []).append(rec)
-
-    contrastive_pairs = []
-
-    # 1) Binary pairs: positive vs negative for same query
-    for query_session_key in positive_by_query:
-        if query_session_key in negative_by_query:
-            for pos in positive_by_query[query_session_key]:
-                for neg in negative_by_query[query_session_key]:
-                    contrastive_pairs.append({
-                        "query": pos["query"],
-                        "positive": pos["text"],
-                        "negative": neg["text"],
-                        "positive_score": pos["search_score"],
-                        "negative_score": neg["search_score"],
-                        "rating_session_id": pos.get("rating_session_id"),
-                        "pair_source": "binary",
-                        "score_gap": None,
-                    })
-
-    # 2) Ranked pairs: higher ranking_score vs lower ranking_score
-    for _, records in ranked_by_query.items():
-        sorted_recs = sorted(records, key=lambda r: r["ranking_score"], reverse=True)
-        for i, higher in enumerate(sorted_recs):
-            for lower in sorted_recs[i + 1:]:
-                if higher["ranking_score"] > lower["ranking_score"]:
-                    contrastive_pairs.append({
-                        "query": higher["query"],
-                        "positive": higher["text"],
-                        "negative": lower["text"],
-                        "positive_score": higher["search_score"],
-                        "negative_score": lower["search_score"],
-                        "rating_session_id": higher.get("rating_session_id"),
-                        "pair_source": "ranked",
-                        "score_gap": higher["ranking_score"] - lower["ranking_score"],
-                    })
+    contrastive_pairs = build_contrastive_pairs(records)
 
     binary_count = sum(1 for p in contrastive_pairs if p["pair_source"] == "binary")
     ranked_count = sum(1 for p in contrastive_pairs if p["pair_source"] == "ranked")
@@ -637,8 +581,8 @@ def export_kv_feedback(
     return {
         "format": format,
         "total_records": len(scoped_feedback),
-        "positive_pairs": len(positives),
-        "negative_pairs": len(negatives),
+        "positive_pairs": positive_count,
+        "negative_pairs": negative_count,
         "contrastive_pairs": len(contrastive_pairs),
         "binary_pairs": binary_count,
         "ranked_pairs": ranked_count,

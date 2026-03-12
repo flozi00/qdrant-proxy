@@ -36,6 +36,8 @@ export interface DocumentSummary {
   url: string;
   content_preview: string;
   faqs_count: number;
+  indexed_at?: string;
+  metadata: Record<string, unknown>;
 }
 
 export interface DocumentDetail {

@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 from qdrant_client import models
 from state import get_app_state
 
-from services import get_feedback_collection_name
+from services import build_contrastive_pairs, get_feedback_collection_name
 
 router = APIRouter()
 
@@ -413,8 +413,9 @@ async def export_feedback(
                 if f.payload.get("rating_session_id") == rating_session_id
             ]
 
-        positives = []
-        negatives = []
+        feedback_records = []
+        positive_count = 0
+        negative_count = 0
 
         for f in scoped_feedback:
             payload = f.payload
@@ -439,85 +440,14 @@ async def export_feedback(
                 "rating_session_id": payload.get("rating_session_id"),
             }
 
+            feedback_records.append(record)
             if user_rating == 1:
-                positives.append(record)
+                positive_count += 1
             elif user_rating == -1:
-                negatives.append(record)
+                negative_count += 1
 
         if format == "contrastive":
-            contrastive_pairs = []
-
-            positive_by_query = {}
-            negative_by_query = {}
-            ranked_by_query = {}
-
-            for p in positives:
-                key = f"{p['query']}::{p.get('rating_session_id') or 'legacy'}"
-                if key not in positive_by_query:
-                    positive_by_query[key] = []
-                positive_by_query[key].append(p)
-
-            for n in negatives:
-                key = f"{n['query']}::{n.get('rating_session_id') or 'legacy'}"
-                if key not in negative_by_query:
-                    negative_by_query[key] = []
-                negative_by_query[key].append(n)
-
-            # Collect all records that have a ranking_score for ranked pairs
-            for record in positives + negatives:
-                if record.get("ranking_score") is not None:
-                    key = (
-                        f"{record['query']}::{record.get('rating_session_id') or 'legacy'}"
-                    )
-                    if key not in ranked_by_query:
-                        ranked_by_query[key] = []
-                    ranked_by_query[key].append(record)
-
-            # 1) Binary pairs: positive vs negative (existing logic)
-            for query_session_key in positive_by_query:
-                if query_session_key in negative_by_query:
-                    for pos in positive_by_query[query_session_key]:
-                        for neg in negative_by_query[query_session_key]:
-                            contrastive_pairs.append(
-                                {
-                                    "query": pos["query"],
-                                    "positive": pos["text"],
-                                    "negative": neg["text"],
-                                    "positive_type": pos["content_type"],
-                                    "negative_type": neg["content_type"],
-                                    "positive_score": pos["search_score"],
-                                    "negative_score": neg["search_score"],
-                                    "rating_session_id": pos.get("rating_session_id"),
-                                    "pair_source": "binary",
-                                    "score_gap": None,
-                                }
-                            )
-
-            # 2) Ranked pairs: higher ranking_score vs lower ranking_score
-            #    This lets "good" results serve as hard negatives to "very good" results
-            for _, records in ranked_by_query.items():
-                # Sort by ranking_score descending
-                sorted_records = sorted(
-                    records, key=lambda r: r["ranking_score"], reverse=True
-                )
-                for i, higher in enumerate(sorted_records):
-                    for lower in sorted_records[i + 1 :]:
-                        if higher["ranking_score"] > lower["ranking_score"]:
-                            contrastive_pairs.append(
-                                {
-                                    "query": higher["query"],
-                                    "positive": higher["text"],
-                                    "negative": lower["text"],
-                                    "positive_type": higher["content_type"],
-                                    "negative_type": lower["content_type"],
-                                    "positive_score": higher["search_score"],
-                                    "negative_score": lower["search_score"],
-                                    "rating_session_id": higher.get("rating_session_id"),
-                                    "pair_source": "ranked",
-                                    "score_gap": higher["ranking_score"]
-                                    - lower["ranking_score"],
-                                }
-                            )
+            contrastive_pairs = build_contrastive_pairs(feedback_records)
 
             binary_count = sum(1 for p in contrastive_pairs if p["pair_source"] == "binary")
             ranked_count = sum(1 for p in contrastive_pairs if p["pair_source"] == "ranked")
@@ -525,8 +455,8 @@ async def export_feedback(
             return FeedbackExportResponse(
                 format=format,
                 total_records=len(scoped_feedback),
-                positive_pairs=len(positives),
-                negative_pairs=len(negatives),
+                positive_pairs=positive_count,
+                negative_pairs=negative_count,
                 contrastive_pairs=len(contrastive_pairs),
                 binary_pairs=binary_count,
                 ranked_pairs=ranked_count,
@@ -558,8 +488,8 @@ async def export_feedback(
             return FeedbackExportResponse(
                 format=format,
                 total_records=len(scoped_feedback),
-                positive_pairs=len(positives),
-                negative_pairs=len(negatives),
+                positive_pairs=positive_count,
+                negative_pairs=negative_count,
                 contrastive_pairs=0,
                 data=all_records,
             )
@@ -612,4 +542,3 @@ async def delete_feedback(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to delete feedback: {str(e)}",
         )
-

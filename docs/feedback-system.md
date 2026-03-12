@@ -225,7 +225,7 @@ Contrastive pairing is built within `(query, rating_session_id)` buckets. This p
 - **Document-to-Document pairs**: Long-form semantic understanding
 - **Cross-type pairs**: Learn that both short and long relevant content should rank high
 - **Ranked pairs**: Use "good" results as hard negatives against "very good" results
-- **Maximum combinations**: Binary pairs (positive×negative) + ranked pairs (all ranking score differences within same query)
+- **Focused combinations**: Binary pairs for thumbs-only feedback, plus ranked pairs that prefer adjacent scores within the same query (`5→4`, `4→3`, `3→2`, `2→1`) and fall back to `5→3` when a query has no 4-star feedback
 
 ## Admin UI: Quality Tab
 

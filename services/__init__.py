@@ -14,6 +14,7 @@ from .embedding import (
     encode_query,
     initialize_models,
 )
+from .feedback_pairs import build_contrastive_pairs
 from .facts import (
     build_faq_response_from_payload,
     extract_title_from_markdown,

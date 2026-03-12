@@ -9,7 +9,7 @@ Provides:
 import hashlib
 import logging
 from datetime import datetime, timedelta, timezone
-from typing import List, Optional
+from typing import Any, List, Optional
 
 from auth import verify_admin_auth
 from config import settings
@@ -42,15 +42,116 @@ def _build_pdf_url_match() -> models.Match:
     return models.MatchText(text=".pdf")
 
 
+def _indexed_at_from_payload(payload: dict[str, Any]) -> Optional[str]:
+    metadata = payload.get("metadata") or {}
+    indexed_at = metadata.get("indexed_at")
+    return indexed_at if isinstance(indexed_at, str) and indexed_at.strip() else None
+
+
+def _indexed_at_sort_value(point: Any) -> datetime:
+    indexed_at = _indexed_at_from_payload(point.payload or {})
+    if not indexed_at:
+        return datetime.min.replace(tzinfo=timezone.utc)
+
+    try:
+        return datetime.fromisoformat(indexed_at.replace("Z", "+00:00"))
+    except ValueError:
+        logger.debug("Invalid indexed_at value on document %s: %s", point.id, indexed_at)
+        return datetime.min.replace(tzinfo=timezone.utc)
+
+
+def _count_document_faqs(
+    qdrant_client,
+    faq_collection: str,
+    faq_exists: bool,
+    doc_id: str,
+) -> int:
+    if not faq_exists:
+        return 0
+
+    return qdrant_client.count(
+        collection_name=faq_collection,
+        count_filter=models.Filter(
+            must=[
+                models.FieldCondition(
+                    key="source_documents[].document_id",
+                    match=models.MatchValue(value=doc_id),
+                )
+            ]
+        ),
+    ).count
+
+
+def _build_document_item(
+    qdrant_client,
+    faq_collection: str,
+    faq_exists: bool,
+    point,
+) -> AdminDocumentItem:
+    payload = point.payload or {}
+    doc_id = str(point.id)
+    content = payload.get("content", "")
+    indexed_at = _indexed_at_from_payload(payload)
+
+    return AdminDocumentItem(
+        doc_id=doc_id,
+        url=payload.get("url", ""),
+        content_preview=content[:500] if content else "",
+        faqs_count=_count_document_faqs(qdrant_client, faq_collection, faq_exists, doc_id),
+        indexed_at=indexed_at,
+        metadata=payload.get("metadata", {}),
+    )
+
+
+def _recent_documents_fallback(
+    qdrant_client,
+    target_collection: str,
+    limit: int,
+    offset: Optional[str],
+):
+    """Fallback when ordered scroll is unavailable: scan, sort in memory, paginate."""
+    all_points = []
+    scroll_offset = None
+
+    while True:
+        batch, scroll_offset = qdrant_client.scroll(
+            collection_name=target_collection,
+            limit=max(limit, 128),
+            offset=scroll_offset,
+            with_payload=True,
+            with_vectors=False,
+        )
+        all_points.extend(batch)
+        if scroll_offset is None:
+            break
+
+    all_points.sort(
+        key=lambda point: (_indexed_at_sort_value(point), str(point.id)),
+        reverse=True,
+    )
+
+    start = 0
+    if offset:
+        try:
+            start = max(int(offset), 0)
+        except ValueError:
+            logger.debug("Ignoring non-integer recent document fallback offset: %s", offset)
+
+    end = start + limit
+    next_offset = str(end) if end < len(all_points) else None
+    return all_points[start:end], next_offset
+
+
 @router.get("/documents", response_model=AdminDocumentsResponse)
 async def admin_list_documents(
     collection_name: Optional[str] = None,
     search: Optional[str] = None,
     limit: int = 20,
     offset: Optional[str] = None,
+    recent_first: bool = False,
     _: bool = Depends(verify_admin_auth),
 ):
-    """List documents with pagination and optional search."""
+    """List documents with pagination, optional search, and recent-first ordering."""
     target_collection = collection_name or COLLECTION_NAME
     app_state = get_app_state()
     qdrant_client = app_state.qdrant_client
@@ -77,75 +178,50 @@ async def admin_list_documents(
 
             items = []
             for point in results:
-                doc_id = str(point.id)
-                content = point.payload.get("content", "")
-
-                # Count FAQs for this document
-                faqs_count = 0
-                if faq_exists:
-                    faqs_count = qdrant_client.count(
-                        collection_name=faq_collection,
-                        count_filter=models.Filter(
-                            must=[
-                                models.FieldCondition(
-                                    key="source_documents[].document_id",
-                                    match=models.MatchValue(value=doc_id),
-                                )
-                            ]
-                        ),
-                    ).count
-
                 items.append(
-                    AdminDocumentItem(
-                        doc_id=doc_id,
-                        url=point.payload.get("url", ""),
-                        content_preview=content[:500] if content else "",
-                        faqs_count=faqs_count,
-                        metadata=point.payload.get("metadata", {}),
-                    )
+                    _build_document_item(qdrant_client, faq_collection, faq_exists, point)
                 )
 
             total = qdrant_client.count(collection_name=target_collection).count
             return AdminDocumentsResponse(items=items, total=total, next_offset=None)
 
-        # Regular scroll
-        result, next_offset_id = qdrant_client.scroll(
-            collection_name=target_collection,
-            limit=limit,
-            offset=offset,
-            with_payload=True,
-            with_vectors=False,
-        )
+        if recent_first:
+            try:
+                result, next_offset_id = qdrant_client.scroll(
+                    collection_name=target_collection,
+                    limit=limit,
+                    offset=offset,
+                    order_by=models.OrderBy(
+                        key="metadata.indexed_at",
+                        direction=models.Direction.DESC,
+                    ),
+                    with_payload=True,
+                    with_vectors=False,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Ordered recent document scroll failed for %s: %s",
+                    target_collection,
+                    exc,
+                )
+                result, next_offset_id = _recent_documents_fallback(
+                    qdrant_client=qdrant_client,
+                    target_collection=target_collection,
+                    limit=limit,
+                    offset=offset,
+                )
+        else:
+            result, next_offset_id = qdrant_client.scroll(
+                collection_name=target_collection,
+                limit=limit,
+                offset=offset,
+                with_payload=True,
+                with_vectors=False,
+            )
 
         items = []
         for point in result:
-            doc_id = str(point.id)
-            content = point.payload.get("content", "")
-
-            # Count FAQs for this document
-            faqs_count = 0
-            if faq_exists:
-                faqs_count = qdrant_client.count(
-                    collection_name=faq_collection,
-                    count_filter=models.Filter(
-                        must=[
-                            models.FieldCondition(
-                                key="source_documents[].document_id",
-                                match=models.MatchValue(value=doc_id),
-                            )
-                        ]
-                    ),
-                ).count
-
-            items.append(
-                AdminDocumentItem(
-                    doc_id=doc_id,
-                    url=point.payload.get("url", ""),
-                    content_preview=content[:500] if content else "",
-                    faqs_count=faqs_count,
-                    metadata=point.payload.get("metadata", {}),
-                )
-            )
+            items.append(_build_document_item(qdrant_client, faq_collection, faq_exists, point))
 
         total = qdrant_client.count(collection_name=target_collection).count
         return AdminDocumentsResponse(

@@ -22,7 +22,7 @@ import os
 import re
 import uuid
 from contextlib import asynccontextmanager
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Set
 from urllib.parse import urlsplit, urlunsplit
 
@@ -103,6 +103,12 @@ def _normalize_content_for_hash(text: str) -> str:
 def _hash_content(text: str) -> str:
     normalized = _normalize_content_for_hash(text)
     return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+
+def _build_document_metadata(metadata: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    merged_metadata = dict(metadata or {})
+    merged_metadata["indexed_at"] = datetime.now(timezone.utc).isoformat()
+    return merged_metadata
 
 
 def _build_url_variants(raw_url: str) -> List[str]:
@@ -1628,6 +1634,7 @@ async def upsert_document_logic(
     if not content or not content.strip():
         raise ValueError("Document content is empty")
 
+    merged_metadata = _build_document_metadata(metadata)
     content_hash = _hash_content(content)
     if target_collection == settings.collection_name:
         try:
@@ -1649,25 +1656,30 @@ async def upsert_document_logic(
             if duplicate_points:
                 duplicate_point = duplicate_points[0]
                 duplicate_url = (duplicate_point.payload or {}).get("url", "")
-                logger.info(
-                    f"Skipping duplicate content for {url_str}; "
-                    f"matches existing doc {duplicate_url or duplicate_point.id}"
-                )
+                if str(duplicate_point.id) != doc_id:
+                    logger.info(
+                        f"Skipping duplicate content for {url_str}; "
+                        f"matches existing doc {duplicate_url or duplicate_point.id}"
+                    )
 
-                return DocumentResponse(
-                    url=duplicate_url or url_str,
-                    doc_id=str(duplicate_point.id),
-                    content=content,
-                    metadata={
-                        **(metadata or {}),
-                        "duplicate_of": duplicate_url or url_str,
-                        "skipped_storage": True,
-                        "skip_reason": "duplicate_content",
-                        "content_hash": content_hash,
-                    },
-                    vector_count=0,
-                    title=title,
-                    hyperlinks=hyperlinks or None,
+                    return DocumentResponse(
+                        url=duplicate_url or url_str,
+                        doc_id=str(duplicate_point.id),
+                        content=content,
+                        metadata={
+                            **merged_metadata,
+                            "duplicate_of": duplicate_url or url_str,
+                            "skipped_storage": True,
+                            "skip_reason": "duplicate_content",
+                            "content_hash": content_hash,
+                        },
+                        vector_count=0,
+                        title=title,
+                        hyperlinks=hyperlinks or None,
+                    )
+
+                logger.info(
+                    f"Refreshing existing document for URL: {url_str} in {target_collection}"
                 )
         except Exception as e:
             logger.warning(f"Duplicate check failed for {url_str}: {e}")
@@ -1682,7 +1694,7 @@ async def upsert_document_logic(
 
         facts_extracted = 0
         merged_metadata = {
-            **(metadata or {}),
+            **merged_metadata,
             "facts_extracted": facts_extracted,
             "skipped_storage": True,
             "skip_reason": "content_too_short",
@@ -1709,7 +1721,7 @@ async def upsert_document_logic(
     dense_vector = await encode_dense(content)
 
     # Prepare payload with enriched extraction metadata
-    payload = {"url": url_str, "content": content, "metadata": metadata or {}}
+    payload = {"url": url_str, "content": content, "metadata": merged_metadata}
     if title:
         payload["title"] = title
     if hyperlinks:
@@ -1717,19 +1729,29 @@ async def upsert_document_logic(
     payload["content_hash"] = content_hash
 
     # Upsert to Qdrant
-    qdrant_client.upsert(
-        collection_name=target_collection,
-        points=[
-            models.PointStruct(
-                id=doc_id,
-                vector={
-                    "colbert": multivector,
-                    "dense": dense_vector,
-                },
-                payload=payload,
-            )
-        ],
-    )
+    try:
+        qdrant_client.upsert(
+            collection_name=target_collection,
+            points=[
+                models.PointStruct(
+                    id=doc_id,
+                    vector={
+                        "colbert": multivector,
+                        "dense": dense_vector,
+                    },
+                    payload=payload,
+                )
+            ],
+        )
+    except Exception as e:
+        logger.error(
+            "Failed to upsert document %s into collection '%s' for URL %s: %s",
+            doc_id,
+            target_collection,
+            url_str,
+            e,
+        )
+        raise
 
     logger.info(f"Document {doc_id} created/updated successfully")
 
@@ -1740,7 +1762,7 @@ async def upsert_document_logic(
         url=url_str,
         doc_id=doc_id,
         content=content,
-        metadata={**(metadata or {}), "facts_extracted": facts_extracted},
+        metadata={**merged_metadata, "facts_extracted": facts_extracted},
         vector_count=len(multivector),
         title=title,
         hyperlinks=hyperlinks or None,
@@ -1765,7 +1787,12 @@ async def create_document(doc: DocumentCreate):
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
     except Exception as e:
-        logger.error(f"Failed to create document: {e}")
+        logger.error(
+            "Failed to create document in collection '%s' for URL %s: %s",
+            doc.collection_name or settings.collection_name,
+            doc.url,
+            e,
+        )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e)
         )
@@ -2075,16 +2102,26 @@ async def submit_feedback(
             payload["doc_url"] = feedback.doc_url
             payload["doc_content"] = feedback.doc_content
 
-        qdrant_client.upsert(
-            collection_name=feedback_collection,
-            points=[
-                models.PointStruct(
-                    id=feedback_id,
-                    vector={"dense": query_embedding},
-                    payload=payload,
-                )
-            ],
-        )
+        try:
+            qdrant_client.upsert(
+                collection_name=feedback_collection,
+                points=[
+                    models.PointStruct(
+                        id=feedback_id,
+                        vector={"dense": query_embedding},
+                        payload=payload,
+                    )
+                ],
+            )
+        except Exception as e:
+            logger.error(
+                "Failed to store feedback in collection '%s' (base collection '%s') for content_type=%s: %s",
+                feedback_collection,
+                target_collection,
+                feedback.content_type,
+                e,
+            )
+            raise
 
         content_id = (
             feedback.faq_id if feedback.content_type == "faq" else feedback.doc_id
@@ -2112,7 +2149,12 @@ async def submit_feedback(
         )
 
     except Exception as e:
-        logger.error(f"Failed to store feedback: {e}")
+        logger.error(
+            "Failed to store feedback for collection '%s' via feedback collection '%s': %s",
+            target_collection,
+            feedback_collection,
+            e,
+        )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to store feedback: {str(e)}",

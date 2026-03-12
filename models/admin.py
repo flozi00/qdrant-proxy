@@ -13,6 +13,7 @@ class AdminDocumentItem(BaseModel):
     url: str
     content_preview: str
     faqs_count: int
+    indexed_at: Optional[str] = None
     metadata: Dict[str, Any]
 
 

@@ -8,11 +8,11 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useState, t
 import { apiFetch, setAdminKey, validateKey } from './api/client';
 import type { AdminStats, CollectionInfo } from './types';
 
-function collectionId(collection: CollectionInfo): string {
+export function collectionId(collection: CollectionInfo): string {
   return collection.alias || collection.name;
 }
 
-function isPrimarySearchCollection(collection: CollectionInfo): boolean {
+export function isPrimarySearchCollection(collection: CollectionInfo): boolean {
   const id = collectionId(collection);
 
   // Keep search/quality scoped to main document collections, not KV/FAQ/feedback/system buckets.

@@ -910,5 +910,9 @@ async def start_reembedding(
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Failed to start re-embedding: {e}")
+        logger.error(
+            "Failed to start re-embedding for collection '%s': %s",
+            request.collection_name or "<all collections>",
+            e,
+        )
         raise HTTPException(status_code=500, detail=str(e))

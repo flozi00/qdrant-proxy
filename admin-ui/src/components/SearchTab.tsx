@@ -18,6 +18,7 @@ import type {
   SearchDocument,
 } from '../types';
 import { urlToDocId } from '../utils';
+import RecentDocumentsPanel from './RecentDocumentsPanel';
 import { FAQEntryDisplay, Modal, StarRating } from './ui';
 
 type SearchMode = 'qdrant';
@@ -229,7 +230,7 @@ export default function SearchTab() {
     <>
       {/* Hero card */}
       <div className="bg-white rounded-lg shadow-md p-8 mb-6">
-        <div className="max-w-4xl mx-auto">
+        <div className="max-w-7xl mx-auto w-full">
           <div className="text-center mb-6">
             <h2 className="text-4xl font-bold text-blue-600 mb-2">🔍 Search &amp; Ingest</h2>
             <p className="text-gray-600">Search local knowledge base, web, or ingest a specific URL</p>
@@ -289,6 +290,9 @@ function KnowledgeBaseSearch() {
   const [llmHintModel, setLlmHintModel] = useState('');
   const [llmHintsLoading, setLlmHintsLoading] = useState(false);
   const [llmHintsError, setLlmHintsError] = useState('');
+  const [llmHintsEnabled, setLlmHintsEnabled] = useState(true);
+  const [llmAutoRate, setLlmAutoRate] = useState(false);
+  const [autoRatedIds, setAutoRatedIds] = useState<Set<string>>(new Set());
   const [ratingSessionId, setRatingSessionId] = useState('');
   const lastQuery = useRef('');
 
@@ -320,10 +324,11 @@ function KnowledgeBaseSearch() {
       setLlmHintsById({});
       setLlmHintModel('');
       setLlmHintsError('');
+      setAutoRatedIds(new Set());
       setHasResults(true);
       setPreviewContent('');
 
-      if (resultDocs.length > 0) {
+      if (resultDocs.length > 0 && llmHintsEnabled) {
         setLlmHintsLoading(true);
         const options: LLMRankDocumentOption[] = resultDocs.map((doc, idx) => ({
           option_id: doc.doc_id || doc.url || `doc-${idx + 1}`,
@@ -347,6 +352,39 @@ function KnowledgeBaseSearch() {
           }
           setLlmHintsById(nextHints);
           setLlmHintModel(ranking.model || '');
+
+          // Auto-rate: submit LLM ratings as feedback automatically
+          if (llmAutoRate && ranking.hints?.length) {
+            const rated = new Set<string>();
+            for (const hint of ranking.hints) {
+              const matchDoc = resultDocs.find(
+                (d, idx) => (d.doc_id || d.url || `doc-${idx + 1}`) === hint.option_id,
+              );
+              if (!matchDoc) continue;
+              const stars = Math.max(1, Math.min(5, hint.stars));
+              const userRating = stars >= 4 ? 1 : stars <= 2 ? -1 : 0;
+              let docId = matchDoc.doc_id;
+              if (!docId && matchDoc.url) docId = urlToDocId(matchDoc.url);
+              try {
+                await apiFetch('/feedback', {
+                  method: 'POST',
+                  body: JSON.stringify({
+                    query: effectiveQuery,
+                    doc_id: docId,
+                    doc_url: matchDoc.url,
+                    doc_content: matchDoc.content,
+                    search_score: matchDoc.score,
+                    user_rating: userRating,
+                    ranking_score: stars,
+                    rating_session_id: nextRatingSessionId,
+                    content_type: 'document',
+                  }),
+                });
+                rated.add(hint.option_id);
+              } catch { /* ignore individual auto-rate failures */ }
+            }
+            setAutoRatedIds(rated);
+          }
         } catch (err) {
           setLlmHintsError(err instanceof Error ? err.message : String(err));
         } finally {
@@ -357,7 +395,7 @@ function KnowledgeBaseSearch() {
       alert('Search failed: ' + (err instanceof Error ? err.message : err));
       setLlmHintsLoading(false);
     }
-  }, [query, limit, hybrid, currentCollection]);
+  }, [query, limit, hybrid, currentCollection, llmHintsEnabled, llmAutoRate]);
 
   const loadQueuedQueries = useCallback(async () => {
     setQueueLoading(true);
@@ -470,6 +508,17 @@ function KnowledgeBaseSearch() {
         </label>
         <span className="text-gray-400">|</span>
         <label className="flex items-center gap-2 cursor-pointer">
+          <input type="checkbox" checked={llmHintsEnabled} onChange={(e) => { setLlmHintsEnabled(e.target.checked); if (!e.target.checked) setLlmAutoRate(false); }} className="h-4 w-4 text-blue-600" />
+          <span>LLM rating hints</span>
+        </label>
+        {llmHintsEnabled && (
+          <label className="flex items-center gap-2 cursor-pointer">
+            <input type="checkbox" checked={llmAutoRate} onChange={(e) => setLlmAutoRate(e.target.checked)} className="h-4 w-4 text-orange-500" />
+            <span className="text-orange-700">Auto-rate (LLM rates directly)</span>
+          </label>
+        )}
+        <span className="text-gray-400">|</span>
+        <label className="flex items-center gap-2 cursor-pointer">
           <input
             type="number"
             value={limit}
@@ -557,11 +606,13 @@ function KnowledgeBaseSearch() {
         </div>
       )}
 
+      {!hasResults && <RecentDocumentsPanel className="mt-6" />}
+
       {/* Results */}
       {hasResults && (
-        <div className="flex flex-col md:flex-row gap-6 items-start mt-6">
+        <div className="mt-6 grid grid-cols-1 xl:grid-cols-[minmax(0,1.55fr)_minmax(360px,1fr)] gap-6 items-start">
           {/* Left: results list */}
-          <div className="w-full md:w-1/2 space-y-6">
+          <div className="min-w-0 space-y-6">
             {/* FAQ Entries */}
             {filteredFaqs.length > 0 && (
               <div className="bg-blue-50 border-l-4 border-blue-500 rounded-lg shadow-sm p-6">
@@ -594,6 +645,7 @@ function KnowledgeBaseSearch() {
                       searchQuery={lastQuery.current}
                       ratingSessionId={ratingSessionId}
                       llmHint={llmHintsById[doc.doc_id || doc.url || `doc-${i + 1}`]}
+                      autoRated={autoRatedIds.has(doc.doc_id || doc.url || `doc-${i + 1}`)}
                     />
                   ))}
                 </div>
@@ -601,9 +653,11 @@ function KnowledgeBaseSearch() {
             </div>
           </div>
 
-          {/* Right: preview */}
-          <div className="w-full md:w-1/2 sticky top-8">
-            <div className="bg-white rounded-lg shadow-lg border-2 border-blue-100 overflow-hidden flex flex-col" style={{ maxHeight: 'calc(100vh - 100px)' }}>
+          <div className="min-w-0 xl:sticky xl:top-8 space-y-6">
+            <RecentDocumentsPanel listClassName="max-h-[30rem] overflow-y-auto" />
+
+            {/* Right: preview */}
+            <div className="bg-white rounded-lg shadow-lg border-2 border-blue-100 overflow-hidden flex flex-col" style={{ maxHeight: 'calc(100vh - 120px)' }}>
               <div className="bg-blue-600 px-4 py-3 flex justify-between items-center text-white">
                 <h3 className="font-bold">Markdown Preview</h3>
                 <div className="flex items-center gap-2">
@@ -938,12 +992,14 @@ function DocResult({
   searchQuery,
   ratingSessionId,
   llmHint,
+  autoRated,
 }: {
   doc: SearchDocument;
   onPreview: (doc: SearchDocument) => void;
   searchQuery: string;
   ratingSessionId?: string;
   llmHint?: LLMDocumentRankingHint;
+  autoRated?: boolean;
 }) {
   const [feedbackStatus, setFeedbackStatus] = useState('');
   const [disabled, setDisabled] = useState(false);
@@ -1030,19 +1086,22 @@ function DocResult({
             {' '}({llmHint.stars}/5), rank #{llmHint.relative_rank}
           </div>
           <div className="mt-1 text-indigo-800">{llmHint.reason}</div>
-          <div className="mt-1 text-indigo-700">Use this as orientation for your manual star feedback below.</div>
+          {autoRated
+            ? <div className="mt-1 font-semibold text-green-700">✓ Auto-rated — feedback submitted automatically</div>
+            : <div className="mt-1 text-indigo-700">Use this as orientation for your manual star feedback below.</div>
+          }
         </div>
       )}
 
       {/* Feedback row */}
       <div className="mt-3 flex items-center gap-2 border-t pt-2 flex-wrap">
         <span className="text-xs text-gray-500">Relevant?</span>
-        <button disabled={disabled} onClick={() => submitFeedback(1)} className="px-2 py-1 rounded text-xs bg-green-100 hover:bg-green-200 text-green-700 disabled:opacity-50">👍</button>
-        <button disabled={disabled} onClick={() => submitFeedback(-1)} className="px-2 py-1 rounded text-xs bg-red-100 hover:bg-red-200 text-red-700 disabled:opacity-50">👎</button>
+        <button disabled={disabled || !!autoRated} onClick={() => submitFeedback(1)} className="px-2 py-1 rounded text-xs bg-green-100 hover:bg-green-200 text-green-700 disabled:opacity-50">👍</button>
+        <button disabled={disabled || !!autoRated} onClick={() => submitFeedback(-1)} className="px-2 py-1 rounded text-xs bg-red-100 hover:bg-red-200 text-red-700 disabled:opacity-50">👎</button>
         <span className="text-xs text-gray-400 mx-1">|</span>
         <span className="text-xs text-gray-500">Rank:</span>
-        <StarRating disabled={disabled} onRate={(s) => submitFeedback(s >= 4 ? 1 : s <= 2 ? -1 : 0, s)} />
-        <span className="text-xs text-gray-400 ml-2">{feedbackStatus}</span>
+        <StarRating disabled={disabled || !!autoRated} onRate={(s) => submitFeedback(s >= 4 ? 1 : s <= 2 ? -1 : 0, s)} />
+        <span className="text-xs text-gray-400 ml-2">{autoRated ? `✓ Auto-rated ${llmHint?.stars ?? ''}/5` : feedbackStatus}</span>
       </div>
     </div>
   );

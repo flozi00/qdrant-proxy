@@ -7,7 +7,7 @@ Provides functions for:
 """
 
 import logging
-from typing import Any, Optional
+from typing import Any, Iterable, Optional
 
 from qdrant_client import QdrantClient, models
 
@@ -190,6 +190,58 @@ def _ensure_feedback_payload_indexes(
             pass
 
 
+def ensure_dense_only_aux_collection(
+    collection_name: str,
+    dense_vector_size: int,
+    payload_indexes: Optional[Iterable[tuple[str, models.PayloadSchemaType]]] = None,
+    *,
+    client: Optional[QdrantClient] = None,
+    on_disk_payload: bool = False,
+) -> None:
+    """Ensure a dense-only auxiliary collection exists with the expected dimension.
+
+    These collections store synthetic placeholder vectors only. When the model
+    dimension changes, recreating them is cheaper and safer than re-embedding.
+    """
+    qdrant_client = _get_qdrant_client(client)
+
+    if qdrant_client.collection_exists(collection_name):
+        current_dense_dim = _get_collection_dense_dim(qdrant_client, collection_name)
+        if current_dense_dim != dense_vector_size:
+            logger.warning(
+                "Dense-only auxiliary collection '%s' has dense dim %s but expected %s; recreating collection",
+                collection_name,
+                current_dense_dim,
+                dense_vector_size,
+            )
+            qdrant_client.delete_collection(collection_name=collection_name)
+            qdrant_client.create_collection(
+                collection_name=collection_name,
+                vectors_config=build_feedback_dense_vectors_config(
+                    dense_vector_size=dense_vector_size,
+                ),
+                on_disk_payload=on_disk_payload,
+            )
+    else:
+        qdrant_client.create_collection(
+            collection_name=collection_name,
+            vectors_config=build_feedback_dense_vectors_config(
+                dense_vector_size=dense_vector_size,
+            ),
+            on_disk_payload=on_disk_payload,
+        )
+
+    for field_name, schema_type in payload_indexes or []:
+        try:
+            qdrant_client.create_payload_index(
+                collection_name=collection_name,
+                field_name=field_name,
+                field_schema=schema_type,
+            )
+        except Exception:
+            pass
+
+
 @linetimer()
 def ensure_feedback_collection(
     base_collection: str,
@@ -209,42 +261,18 @@ def ensure_feedback_collection(
     target_dense_dim = dense_vector_size or _get_state().dense_vector_size
 
     try:
-        if client.collection_exists(feedback_collection):
-            current_dense_dim = _get_collection_dense_dim(client, feedback_collection)
-            if current_dense_dim == target_dense_dim:
-                logger.debug(
-                    "Feedback collection '%s' already exists with dense dim %s",
-                    feedback_collection,
-                    current_dense_dim,
-                )
-                _ensure_feedback_payload_indexes(client, feedback_collection)
-                return
-
-            logger.warning(
-                "Feedback collection '%s' has dense dim %s but expected %s; recreating collection",
-                feedback_collection,
-                current_dense_dim,
-                target_dense_dim,
-            )
-            client.delete_collection(collection_name=feedback_collection)
-
-        logger.info(
-            "Creating feedback collection '%s' (dense dim: %s)...",
-            feedback_collection,
-            target_dense_dim,
-        )
-
-        client.create_collection(
+        ensure_dense_only_aux_collection(
             collection_name=feedback_collection,
-            vectors_config=build_feedback_dense_vectors_config(
-                dense_vector_size=target_dense_dim
-            ),
-        )
-
-        _ensure_feedback_payload_indexes(client, feedback_collection)
-        logger.info(
-            "Feedback collection '%s' created successfully",
-            feedback_collection,
+            dense_vector_size=target_dense_dim,
+            payload_indexes=[
+                ("faq_id", models.PayloadSchemaType.KEYWORD),
+                ("user_rating", models.PayloadSchemaType.INTEGER),
+                ("ranking_score", models.PayloadSchemaType.INTEGER),
+                ("rating_session_id", models.PayloadSchemaType.KEYWORD),
+                ("collection_name", models.PayloadSchemaType.KEYWORD),
+                ("created_at", models.PayloadSchemaType.DATETIME),
+            ],
+            client=client,
         )
 
     except Exception as e:

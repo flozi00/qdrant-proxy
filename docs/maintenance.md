@@ -48,6 +48,7 @@ sequenceDiagram
 - **Clean state**: New collection has consistent vectors from the same model version
 - **Resume-safe**: If migration fails, the incomplete target collection is cleaned up automatically
 - **Alias-aware**: When re-embedding a collection behind an alias, the alias is automatically detected and moved to point to the new collection
+- **Oversize retry**: Dense embedding requests that exceed the model context window retry once with the text truncated to the endpoint-reported token limit, expressed as the same number of characters
 
 ### Selective Re-Embedding
 
@@ -64,6 +65,7 @@ The re-embedding tool supports selective processing of specific vector types. It
 | `vector_types` | list[string] | `["dense", "colbert", "sparse"]` | Types to include |
 
 Migration collections (`_migration_`) and feedback collections (`*_feedback`) are automatically excluded when processing all collections.
+Synthetic dense-only collections such as feedback stores and the replay query queue are recreated with placeholder vectors when the dense dimension changes; they do not need semantic re-embedding.
 
 ### Example: Re-embed a Collection
 

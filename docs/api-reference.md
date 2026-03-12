@@ -15,6 +15,8 @@ All admin endpoints require `Authorization: Bearer <QDRANT_PROXY_ADMIN_KEY>`.
 
 When a document is missing, `/documents/{doc_id}` and `/documents/by-url/{url}` return `404` so callers can distinguish not-found from server errors.
 
+Every successful `/documents` upsert refreshes `metadata.indexed_at` server-side. The admin Recent Index Activity view sorts by that field, so re-indexing an existing URL moves it back into the newest documents list.
+
 `/documents/resolve` is a dedicated URL resolver endpoint; use it when you only have a URL instead of a document ID.
 
 ## Search
@@ -45,7 +47,7 @@ Document collections ensure payload indexes for `metadata.indexed_at`, `metadata
 |--------|----------|-------------|
 | `GET` | `/admin` | Admin UI |
 | `GET` | `/admin/stats` | Collection statistics |
-| `GET` | `/admin/documents` | List documents |
+| `GET` | `/admin/documents` | List documents (`recent_first=true` returns latest indexed documents first) |
 | `GET` | `/admin/documents/{id}` | Document details + FAQ entries |
 | `POST` | `/admin/documents/generate-faq` | LLM-generate Q&A from selected text + find duplicates |
 | `POST` | `/admin/documents/submit-faq` | Submit reviewed FAQ (create new or merge into existing) |
@@ -65,7 +67,7 @@ The admin UI (`/admin`) is a React + TypeScript SPA built with Vite and Tailwind
 
 **Tabs:**
 
-1. **Search** — Knowledge base search with side-by-side markdown preview and 👍/👎/★ feedback. The preview panel and document detail modal support **text selection → LLM FAQ generation** with duplicate detection and merge capability. Document cards also show an **LLM-based rating hint** (relative rank, 1-5 stars, reason) to help users calibrate manual star feedback.
+1. **Search** — Knowledge base search with side-by-side markdown preview and 👍/👎/★ feedback. The preview panel and document detail modal support **text selection → LLM FAQ generation** with duplicate detection and merge capability. Document cards also show an **LLM-based rating hint** (relative rank, 1-5 stars, reason) to help users calibrate manual star feedback. This tab now also includes a **Recent Index Activity** panel for live inspection of the latest indexed documents in the selected collection, with optional auto-refresh.
 2. **FAQ / KV** — Collection selector, CRUD interface, semantic search with score threshold, per-result feedback.
 3. **Quality Feedback** — Search feedback stats/recommendations/failure patterns, FAQ quality sub-tab, feedback list with filters, contrastive training data export.
 4. **Maintenance** — Read-only embedding model info, blue-green re-embedding with collection dropdown.

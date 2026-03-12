@@ -18,7 +18,7 @@ The Qdrant Proxy is a FastAPI-based service providing advanced vector search wit
 - **FAQ / KV store** — Per-collection key-value entries with semantic search
 - **Blue-green re-embedding** — Zero-downtime embedding model migration via Qdrant aliases
 - **Search quality feedback** — Binary + ranked feedback collection with contrastive training data export
-- **Admin UI** — React + Vite SPA with search, FAQ CRUD, quality dashboard, and maintenance tools
+- **Admin UI** — React + Vite SPA with search, live recent-index explorer, FAQ CRUD, quality dashboard, and maintenance tools
 - **MCP integration** — Full tool access at `/mcp-server/mcp` for AI agents
 
 ### Key Design Decisions
@@ -31,7 +31,14 @@ The Qdrant Proxy is a FastAPI-based service providing advanced vector search wit
 | Blue-green migration | Zero-downtime model switching via Qdrant collection aliases |
 | Deterministic FAQ IDs | UUID5 from normalized Q+A enables automatic merge detection |
 
-### Documentation Index
+## 2. Repository Scan
+
+- The repository is a multi-service workspace rooted at `services/`, with Qdrant Proxy implemented under `services/qdrant-proxy/` and deployed alongside separate inference and utility services.
+- Python dependency management is centralized in the repository root `pyproject.toml` with Python `>=3.12,<3.13`; local editor workflows use the repository virtual environment when present, while container runs are wired through the compose files in the repository root.
+- Qdrant Proxy runtime configuration is centralized in `services/qdrant-proxy/config.py`, with model IDs persisted via `system_config` and endpoint URLs supplied through environment variables such as `DENSE_EMBEDDING_URL` and `COLBERT_EMBEDDING_URL`.
+- Dense embedding requests are sent to an OpenAI-compatible vLLM endpoint and now retry oversized inputs with a second pass truncated to the endpoint-reported context limit in characters.
+
+## 3. Documentation Index
 
 | Document | Contents |
 |----------|----------|

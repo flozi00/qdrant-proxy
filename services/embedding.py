@@ -6,6 +6,7 @@ Provides functions for:
 """
 
 import logging
+import re
 import time
 from typing import Any, List, Optional
 
@@ -22,10 +23,21 @@ logger = logging.getLogger(__name__)
 # ColBERT output vector dimension (per token)
 _COLBERT_DIM = 128
 
-# Approximate character limit for text truncation before tokenization.
-# Both ColBERT (8192 tokens) and Dense (8192 tokens) models have token limits.
-# ~3 chars/token average for multilingual text → 20000 chars is a safe cutoff.
-_MAX_TEXT_CHARS = 20000
+# Conservative character limit for pre-tokenization truncation.
+# In practice some PDFs and form-heavy documents produce close to 1 token/2 chars,
+# so keep more headroom than the previous 20k-char heuristic before calling vLLM.
+_MAX_TEXT_CHARS = 16000
+_MIN_RETRY_CHARS = 512
+_CONTEXT_LENGTH_ERROR_PATTERNS = (
+    re.compile(
+        r"passed\s+(?P<passed>\d+)\s+input tokens.*?context length is only\s+(?P<limit>\d+)",
+        flags=re.IGNORECASE | re.DOTALL,
+    ),
+    re.compile(
+        r"maximum context length is\s+(?P<limit>\d+)\s+tokens.*?contains at least\s+(?P<passed>\d+)\s+input tokens",
+        flags=re.IGNORECASE | re.DOTALL,
+    ),
+)
 
 # Module-level client references (set by initialize_models)
 _colbert_client: Optional[httpx.AsyncClient] = None
@@ -141,6 +153,65 @@ def _is_colbert_unavailable_error(exc: Exception) -> bool:
             return True
 
     return False
+
+
+def _extract_context_window(exc: Exception) -> Optional[tuple[int, int]]:
+    """Parse vLLM/OpenAI-style context window errors.
+
+    Returns ``(passed_tokens, context_limit)`` when the message includes both values.
+    """
+    match = None
+    for pattern in _CONTEXT_LENGTH_ERROR_PATTERNS:
+        match = pattern.search(_error_text(exc))
+        if match:
+            break
+
+    if not match:
+        return None
+
+    try:
+        passed_tokens = int(match.group("passed"))
+        context_limit = int(match.group("limit"))
+    except (TypeError, ValueError):
+        return None
+
+    if passed_tokens <= 0 or context_limit <= 0:
+        return None
+    return passed_tokens, context_limit
+
+
+def _compute_retry_char_limit(text: str, exc: Exception) -> Optional[int]:
+    """Map context-window errors to a deterministic retry char budget."""
+    context_window = _extract_context_window(exc)
+    if context_window is None:
+        return None
+
+    _, context_limit = context_window
+    base_length = min(len(text), _MAX_TEXT_CHARS)
+    retry_limit = min(base_length - 1, context_limit)
+    if retry_limit < _MIN_RETRY_CHARS:
+        retry_limit = min(base_length - 1, _MIN_RETRY_CHARS)
+
+    if retry_limit <= 0 or retry_limit >= base_length:
+        return None
+    return retry_limit
+
+
+def _truncate_for_dense_retry(text: str, retry_char_limit: Optional[int]) -> str:
+    if retry_char_limit is None:
+        return text[:_MAX_TEXT_CHARS]
+
+    truncated = text[:retry_char_limit].rstrip()
+    if not truncated:
+        truncated = text[:retry_char_limit]
+    return truncated
+
+
+def _truncate_embedding_text(text: str, char_limit: int = _MAX_TEXT_CHARS) -> str:
+    truncated = text[:char_limit].rstrip()
+    if not truncated:
+        truncated = text[:char_limit]
+    return truncated
 
 
 def get_dense_client() -> Any:
@@ -317,7 +388,7 @@ async def _call_colbert_api(
     _, colbert_model_id = _current_model_ids()
 
     prefix = "[Q] " if is_query else "[D] "
-    prefixed_texts = [f"{prefix}{t[:_MAX_TEXT_CHARS]}" for t in texts]
+    prefixed_texts = [f"{prefix}{_truncate_embedding_text(t)}" for t in texts]
 
     response = await _colbert_client.post(
         "/pooling",
@@ -416,20 +487,33 @@ async def encode_query(text: str) -> List[List[float]]:
 async def encode_dense(text: str) -> List[float]:
     """Generate dense embedding via OpenAI-compatible vLLM endpoint."""
     client = get_dense_client()
+    dense_model_id, _ = _current_model_ids()
+    text_truncated = _truncate_embedding_text(text)
+
+    def _call_api(input_text: str):
+        response = client.embeddings.create(
+            input=input_text,
+            model=dense_model_id,
+        )
+        return response.data[0].embedding
+
     try:
-        text_truncated = text[:_MAX_TEXT_CHARS]
-        dense_model_id, _ = _current_model_ids()
-
-        def _call_api():
-            response = client.embeddings.create(
-                input=text_truncated,
-                model=dense_model_id,
-            )
-            return response.data[0].embedding
-
-        embedding = await run_in_threadpool(_call_api)
+        embedding = await run_in_threadpool(_call_api, text_truncated)
         return embedding
     except Exception as e:
+        retry_char_limit = _compute_retry_char_limit(text, e)
+        if retry_char_limit is not None:
+            retry_text = _truncate_for_dense_retry(text, retry_char_limit)
+            logger.warning(
+                "Dense embedding input exceeded context window; retrying with %d chars instead of %d",
+                len(retry_text),
+                len(text_truncated),
+            )
+            try:
+                return await run_in_threadpool(_call_api, retry_text)
+            except Exception as retry_exc:
+                e = retry_exc
+
         logger.error(f"Failed to generate dense embedding: {e}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -452,9 +536,9 @@ async def encode_dense_batch(texts: List[str], batch_size: int = 8) -> List[List
         return []
     
     client = get_dense_client()
+    dense_model_id, _ = _current_model_ids()
     try:
-        texts_truncated = [t[:_MAX_TEXT_CHARS] for t in texts]
-        dense_model_id, _ = _current_model_ids()
+        texts_truncated = [_truncate_embedding_text(t) for t in texts]
 
         def _call_api_batch():
             response = client.embeddings.create(
@@ -466,6 +550,11 @@ async def encode_dense_batch(texts: List[str], batch_size: int = 8) -> List[List
         embeddings = await run_in_threadpool(_call_api_batch)
         return embeddings
     except Exception as e:
+        if _extract_context_window(e) is not None:
+            logger.warning(
+                "Dense embedding batch exceeded context window; retrying each item individually"
+            )
+            return [await encode_dense(text) for text in texts]
         logger.error(f"Failed to batch generate dense embeddings: {e}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
