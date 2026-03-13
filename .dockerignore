@@ -1,0 +1,67 @@
+# Git
+.git
+.gitignore
+.gitattributes
+
+# CI/CD
+.github
+
+# Python
+__pycache__
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info
+dist
+build
+.pytest_cache
+.coverage
+htmlcov
+.tox
+.mypy_cache
+.dmypy.json
+dmypy.json
+.ruff_cache
+
+# Virtual environments
+venv
+env
+ENV
+.venv
+
+# IDE
+.vscode
+.idea
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Documentation
+docs
+*.md
+!requirements.txt
+
+# Admin UI build artifacts (will be built in container)
+admin-ui/node_modules
+admin-ui/dist
+admin-ui/.vite
+
+# Tests
+tests
+*.test.py
+
+# Environment files
+.env
+.env.local
+.env.*.local
+
+# Logs
+*.log
+logs
+
+# Temporary files
+tmp
+temp
+*.tmp

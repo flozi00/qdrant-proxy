@@ -1,0 +1,150 @@
+name: Docker Build and Push
+
+on:
+  push:
+    branches:
+      - '**'  # Trigger on all branches
+    tags:
+      - 'v*'  # Trigger on version tags
+  delete:
+    branches:
+      - '**'  # Trigger when branches are deleted
+
+env:
+  DOCKER_IMAGE: flozi00/qdrant-proxy
+
+jobs:
+  # Build and push Docker image
+  build-and-push:
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.DOCKER_IMAGE }}
+          tags: |
+            # For version tags (v1.0.0)
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
+            # For branch pushes
+            type=ref,event=branch
+            # For main/master branch, also tag as latest
+            type=raw,value=latest,enable={{is_default_branch}}
+            # Add SHA for traceability
+            type=sha,prefix={{branch}}-
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          platforms: linux/amd64,linux/arm64
+
+  # Cleanup old images when branches are deleted
+  cleanup-deleted-branch:
+    if: github.event_name == 'delete' && github.event.ref_type == 'branch'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Delete Docker image for deleted branch
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+          BRANCH_NAME: ${{ github.event.ref }}
+        run: |
+          # Get Docker Hub token
+          TOKEN=$(curl -s -H "Content-Type: application/json" \
+            -X POST \
+            -d "{\"username\": \"${DOCKERHUB_USERNAME}\", \"password\": \"${DOCKERHUB_TOKEN}\"}" \
+            https://hub.docker.com/v2/users/login/ | jq -r .token)
+
+          # Sanitize branch name for Docker tag (replace / with -)
+          TAG=$(echo "${BRANCH_NAME}" | sed 's/\//-/g')
+
+          echo "Attempting to delete tag: ${TAG}"
+
+          # Get all tags
+          TAGS=$(curl -s -H "Authorization: JWT ${TOKEN}" \
+            "https://hub.docker.com/v2/repositories/${DOCKER_IMAGE}/tags/?page_size=100" | \
+            jq -r '.results[].name')
+
+          # Delete branch tag
+          if echo "${TAGS}" | grep -q "^${TAG}$"; then
+            curl -X DELETE \
+              -H "Authorization: JWT ${TOKEN}" \
+              "https://hub.docker.com/v2/repositories/${DOCKER_IMAGE}/tags/${TAG}/"
+            echo "Deleted tag: ${TAG}"
+          else
+            echo "Tag ${TAG} not found, nothing to delete"
+          fi
+
+          # Delete SHA tags associated with the branch
+          for sha_tag in $(echo "${TAGS}" | grep "^${TAG}-sha-"); do
+            curl -X DELETE \
+              -H "Authorization: JWT ${TOKEN}" \
+              "https://hub.docker.com/v2/repositories/${DOCKER_IMAGE}/tags/${sha_tag}/"
+            echo "Deleted SHA tag: ${sha_tag}"
+          done
+
+  # Cleanup old SHA tags when new version is pushed
+  cleanup-old-tags:
+    if: github.event_name == 'push'
+    needs: build-and-push
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Cleanup old SHA tags
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+          BRANCH_NAME: ${{ github.ref_name }}
+        run: |
+          # Get Docker Hub token
+          TOKEN=$(curl -s -H "Content-Type: application/json" \
+            -X POST \
+            -d "{\"username\": \"${DOCKERHUB_USERNAME}\", \"password\": \"${DOCKERHUB_TOKEN}\"}" \
+            https://hub.docker.com/v2/users/login/ | jq -r .token)
+
+          # Sanitize branch name for Docker tag
+          TAG=$(echo "${BRANCH_NAME}" | sed 's/\//-/g')
+
+          echo "Cleaning up old SHA tags for branch: ${TAG}"
+
+          # Get all SHA tags for this branch, sorted by last updated (newest first)
+          SHA_TAGS=$(curl -s -H "Authorization: JWT ${TOKEN}" \
+            "https://hub.docker.com/v2/repositories/${DOCKER_IMAGE}/tags/?page_size=100&name=${TAG}-sha-" | \
+            jq -r '.results | sort_by(.last_updated) | reverse | .[].name')
+
+          # Keep only the 3 most recent SHA tags, delete the rest
+          COUNTER=0
+          for sha_tag in ${SHA_TAGS}; do
+            COUNTER=$((COUNTER + 1))
+            if [ ${COUNTER} -gt 3 ]; then
+              curl -X DELETE \
+                -H "Authorization: JWT ${TOKEN}" \
+                "https://hub.docker.com/v2/repositories/${DOCKER_IMAGE}/tags/${sha_tag}/"
+              echo "Deleted old SHA tag: ${sha_tag}"
+            else
+              echo "Keeping recent SHA tag: ${sha_tag}"
+            fi
+          done
