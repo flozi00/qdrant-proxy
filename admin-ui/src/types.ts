@@ -31,15 +31,6 @@ export interface FAQEntry {
 
 // --- Documents ---
 
-export interface AdminDocumentItem {
-  doc_id: string;
-  url: string;
-  content_preview: string;
-  faqs_count: number;
-  indexed_at?: string;
-  metadata: Record<string, unknown>;
-}
-
 export interface DocumentSummary {
   doc_id: string;
   url: string;
