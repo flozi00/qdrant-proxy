@@ -1,0 +1,84 @@
+version: '3.8'
+
+services:
+  qdrant-proxy:
+    image: flozi00/qdrant-proxy:latest
+    container_name: qdrant-proxy
+    ports:
+      - "8000:8000"
+    environment:
+      # Qdrant Configuration
+      - QDRANT_URL=http://qdrant:6333
+      - COLLECTION_NAME=documents
+
+      # Embedding Models
+      - DENSE_MODEL_NAME=Qwen/Qwen3-Embedding-4B
+      - DENSE_EMBEDDING_URL=http://vllm-embedding:9093/v1
+      - DENSE_VECTOR_SIZE=1024
+      - COLBERT_MODEL_NAME=VAGOsolutions/SauerkrautLM-Multi-ModernColBERT
+
+      # LLM Configuration
+      - LITELLM_BASE_URL=http://litellm:4000/v1
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - FACT_EXTRACTION_MODEL=default
+      - LLM_RANKING_MODEL=gpt-5
+
+      # Admin Configuration
+      - QDRANT_PROXY_ADMIN_KEY=${QDRANT_PROXY_ADMIN_KEY}
+
+      # Server Configuration
+      - PORT=8000
+      - LOG_LEVEL=info
+      - MIN_CONTENT_WORDS=32
+    depends_on:
+      - qdrant
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: qdrant
+    ports:
+      - "6333:6333"
+      - "6334:6334"
+    volumes:
+      - qdrant_storage:/qdrant/storage
+    restart: unless-stopped
+
+volumes:
+  qdrant_storage:
+    driver: local
+
+# Optional: Add embedding and LLM services
+# Uncomment and configure based on your setup
+#
+#  vllm-embedding:
+#    image: vllm/vllm-openai:latest
+#    container_name: vllm-embedding
+#    ports:
+#      - "9093:9093"
+#    environment:
+#      - MODEL=Qwen/Qwen3-Embedding-4B
+#    volumes:
+#      - vllm_cache:/root/.cache
+#    deploy:
+#      resources:
+#        reservations:
+#          devices:
+#            - driver: nvidia
+#              count: 1
+#              capabilities: [gpu]
+#
+#  litellm:
+#    image: ghcr.io/berriai/litellm:main
+#    container_name: litellm
+#    ports:
+#      - "4000:4000"
+#    environment:
+#      - OPENAI_API_KEY=${OPENAI_API_KEY}
+#    restart: unless-stopped
