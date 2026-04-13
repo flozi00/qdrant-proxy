@@ -5,6 +5,7 @@
  * ============================================================================ */
 
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { detectAll } from 'tinyld/light';
 import { marked } from 'marked';
 import { apiFetch } from '../api/client';
 import { mcpClient } from '../api/mcp';
@@ -58,6 +59,24 @@ interface QueuedQuery {
 }
 
 type MatchFilterMode = 'word' | 'chain' | 'word_or_chain';
+
+const QUEUE_LANGUAGE_LABELS: Record<string, string> = {
+  de: 'German',
+  en: 'English',
+};
+const MIN_QUEUE_LANGUAGE_DETECTION_ACCURACY = 0.2;
+
+function detectQueuedQueryLanguage(query: string): string {
+  const normalized = query.trim().toLowerCase();
+  if (!normalized) return 'Unknown';
+
+  const detected = detectAll(normalized)
+    .find((candidate) =>
+      candidate.accuracy >= MIN_QUEUE_LANGUAGE_DETECTION_ACCURACY
+      && candidate.lang in QUEUE_LANGUAGE_LABELS);
+
+  return detected ? QUEUE_LANGUAGE_LABELS[detected.lang] : 'Unknown';
+}
 
 function escapeRegex(text: string): string {
   return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -484,6 +503,27 @@ function KnowledgeBaseSearch() {
     });
   }, [docs, minMatchCount, matchFilterMode]);
 
+  const groupedQueuedQueries = useMemo(() => {
+    const groups = new Map<string, QueuedQuery[]>();
+    for (const item of queuedQueries) {
+      const language = detectQueuedQueryLanguage(item.query);
+      const existing = groups.get(language);
+      if (existing) {
+        existing.push(item);
+      } else {
+        groups.set(language, [item]);
+      }
+    }
+
+    return Array.from(groups.entries())
+      .sort(([left], [right]) => {
+        if (left === 'Unknown') return 1;
+        if (right === 'Unknown') return -1;
+        return left.localeCompare(right);
+      })
+      .map(([language, items]) => ({ language, items }));
+  }, [queuedQueries]);
+
   return (
     <>
       {/* Search input */}
@@ -549,10 +589,14 @@ function KnowledgeBaseSearch() {
             className="min-w-[320px] max-w-full px-2 py-1 border rounded bg-white text-sm"
           >
             <option value="">Select queued query...</option>
-            {queuedQueries.map((item) => (
-              <option key={item.id} value={item.id}>
-                {item.query} ({item.source})
-              </option>
+            {groupedQueuedQueries.map((group) => (
+              <optgroup key={group.language} label={`${group.language} queries (${group.items.length})`}>
+                {group.items.map((item) => (
+                  <option key={item.id} value={item.id}>
+                    {item.query} ({item.source})
+                  </option>
+                ))}
+              </optgroup>
             ))}
           </select>
           <button
@@ -1357,4 +1401,3 @@ function DocumentDetailView({
     </>
   );
 }
-
