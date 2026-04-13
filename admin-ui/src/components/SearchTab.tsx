@@ -77,7 +77,7 @@ function detectQueuedQueryLanguage(query: string): string {
   const normalized = query.trim().toLowerCase();
   if (!normalized) return 'Unknown';
 
-  if (/[äöüß]/i.test(normalized)) return 'German';
+  if (/[äöüß]/.test(normalized)) return 'German';
 
   const tokens = new Set(normalized.match(/\p{L}+/gu) || []);
 
@@ -607,7 +607,7 @@ function KnowledgeBaseSearch() {
           >
             <option value="">Select queued query...</option>
             {groupedQueuedQueries.map((group) => (
-              <optgroup key={group.language} label={`${group.language} (${group.items.length})`}>
+              <optgroup key={group.language} label={`${group.language} queries (${group.items.length})`}>
                 {group.items.map((item) => (
                   <option key={item.id} value={item.id}>
                     {item.query} ({item.source})
