@@ -64,13 +64,16 @@ const QUEUE_LANGUAGE_LABELS: Record<string, string> = {
   de: 'German',
   en: 'English',
 };
+const MIN_QUEUE_LANGUAGE_DETECTION_ACCURACY = 0.2;
 
 function detectQueuedQueryLanguage(query: string): string {
   const normalized = query.trim().toLowerCase();
   if (!normalized) return 'Unknown';
 
   const detected = detectAll(normalized)
-    .find((candidate) => candidate.accuracy >= 0.2 && candidate.lang in QUEUE_LANGUAGE_LABELS);
+    .find((candidate) =>
+      candidate.accuracy >= MIN_QUEUE_LANGUAGE_DETECTION_ACCURACY
+      && candidate.lang in QUEUE_LANGUAGE_LABELS);
 
   return detected ? QUEUE_LANGUAGE_LABELS[detected.lang] : 'Unknown';
 }
