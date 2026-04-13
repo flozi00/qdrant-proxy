@@ -5,6 +5,7 @@
  * ============================================================================ */
 
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { detectAll } from 'tinyld/light';
 import { marked } from 'marked';
 import { apiFetch } from '../api/client';
 import { mcpClient } from '../api/mcp';
@@ -59,40 +60,19 @@ interface QueuedQuery {
 
 type MatchFilterMode = 'word' | 'chain' | 'word_or_chain';
 
-const GERMAN_LANGUAGE_HINTS = [
-  'der', 'die', 'das', 'und', 'oder', 'nicht', 'ist', 'sind', 'wie', 'was',
-  'warum', 'wann', 'wo', 'ein', 'eine', 'einer', 'einen', 'für', 'mit', 'ohne',
-  'von', 'zu', 'im', 'auf', 'passwort', 'rechnung', 'rechnungen', 'zurück',
-  'zurueck', 'zurücksetzen', 'zuruecksetzen', 'finde', 'mein', 'meine', 'ich',
-];
-
-const ENGLISH_LANGUAGE_HINTS = [
-  'the', 'and', 'or', 'not', 'is', 'are', 'how', 'what', 'why', 'when', 'where',
-  'can', 'does', 'do', 'with', 'without', 'from', 'to', 'in', 'on', 'reset',
-  'password', 'billing', 'address', 'invoice', 'invoices', 'token', 'status',
-  'update', 'sync', 'find', 'my',
-];
+const QUEUE_LANGUAGE_LABELS: Record<string, string> = {
+  de: 'German',
+  en: 'English',
+};
 
 function detectQueuedQueryLanguage(query: string): string {
   const normalized = query.trim().toLowerCase();
   if (!normalized) return 'Unknown';
 
-  if (/[äöüß]/.test(normalized)) return 'German';
+  const detected = detectAll(normalized)
+    .find((candidate) => candidate.accuracy >= 0.2 && candidate.lang in QUEUE_LANGUAGE_LABELS);
 
-  const tokens = new Set(normalized.match(/\p{L}+/gu) || []);
-
-  const germanScore = GERMAN_LANGUAGE_HINTS.reduce(
-    (score, token) => score + (tokens.has(token) ? 1 : 0),
-    0,
-  );
-  const englishScore = ENGLISH_LANGUAGE_HINTS.reduce(
-    (score, token) => score + (tokens.has(token) ? 1 : 0),
-    0,
-  );
-
-  if (germanScore > englishScore) return 'German';
-  if (englishScore > germanScore) return 'English';
-  return 'Unknown';
+  return detected ? QUEUE_LANGUAGE_LABELS[detected.lang] : 'Unknown';
 }
 
 function escapeRegex(text: string): string {
