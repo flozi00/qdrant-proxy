@@ -72,7 +72,7 @@ The admin UI (`/admin`) is a React + TypeScript SPA built with Vite and Tailwind
 3. **Quality Feedback** — Search feedback stats/recommendations/failure patterns, FAQ quality sub-tab, feedback list with filters, contrastive training data export.
 4. **Maintenance** — Read-only embedding model info, blue-green re-embedding with collection dropdown.
 
-Admin UI search uses the MCP tool `search_knowledge_base`. The UI initializes an MCP session and reuses the `mcp-session-id` header for all subsequent tool calls. The MCP client accepts both JSON and SSE responses, then normalizes tool results by preferring `structuredContent` or parsing JSON text payloads.
+Admin UI search uses the MCP tool `search_knowledge_base`. The UI initializes an MCP session and reuses the `mcp-session-id` header for all subsequent tool calls. The MCP client accepts both JSON and SSE responses, then normalizes tool results by preferring `structuredContent` or parsing JSON text payloads. Search queries support Google-dork style operators such as `site:`, `inurl:`, `intitle:`, `filetype:`, `before:`, `after:`, and quoted phrases.
 
 ## FAQ / KV REST Endpoints
 

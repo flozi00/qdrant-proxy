@@ -28,6 +28,14 @@ from services.hybrid_search import (
     normalize_score_threshold_for_mode,
     search_faqs,
 )
+from services.facts import build_faq_response_from_payload
+from services.search_syntax import (
+    filter_document_points,
+    filter_faq_dicts,
+    parse_google_dork_query,
+    scroll_matching_documents,
+    scroll_matching_faqs,
+)
 from state import get_app_state
 
 from services import (
@@ -78,16 +86,23 @@ async def search_documents(search: SearchRequest):
 
     target_collection = search.collection_name or settings.collection_name
     logger.info(f"Searching for: {search.query} in {target_collection}")
+    parsed_query = parse_google_dork_query(search.query)
+    candidate_limit = min(max(search.limit * 5, search.limit + 20), 200)
 
     # Ensure collection exists (cached after first successful check).
     _ensure_collection_cached(target_collection)
 
-    # Encode query once for the universal hybrid pipeline.
-    start_vectors = time.perf_counter()
-    query_multivector, query_dense = await encode_hybrid_query(search.query)
-    logger.info(
-        f"Hybrid query encoding took: {time.perf_counter() - start_vectors:.3f}s"
-    )
+    query_multivector = None
+    query_dense = None
+    if parsed_query.has_text_query:
+        # Encode query once for the universal hybrid pipeline.
+        start_vectors = time.perf_counter()
+        query_multivector, query_dense = await encode_hybrid_query(
+            parsed_query.semantic_query
+        )
+        logger.info(
+            f"Hybrid query encoding took: {time.perf_counter() - start_vectors:.3f}s"
+        )
 
     # Build filter - combine custom filter with URL exclusion
     filter_conditions = []
@@ -120,9 +135,17 @@ async def search_documents(search: SearchRequest):
 
         # Check if time-based boosting is enabled
         boost_config = search.boost_recent or {}
-        enable_boost = boost_config.get("enabled", True)
+        enable_boost = boost_config.get("enabled", True) and parsed_query.has_text_query
 
-        if search.use_hybrid:
+        if not parsed_query.has_text_query:
+            results = scroll_matching_documents(
+                qdrant_client=qdrant_client,
+                collection_name=target_collection,
+                parsed=parsed_query,
+                limit=search.limit,
+                scroll_filter=query_filter,
+            )
+        elif search.use_hybrid:
             logger.info(
                 f"Starting hybrid Qdrant query with {search.limit} results..."
             )
@@ -174,11 +197,11 @@ async def search_documents(search: SearchRequest):
                     collection_name=target_collection,
                     query_multivector=query_multivector,
                     query_dense=query_dense,
-                    limit=search.limit,
+                    limit=candidate_limit,
                     query_filter=query_filter,
                     with_payload=True,
                     score_query=score_query,
-                    rerank_limit=search.limit * 2,
+                    rerank_limit=max(search.limit * 2, candidate_limit),
                 )
             else:
                 results = execute_hybrid_search(
@@ -186,7 +209,7 @@ async def search_documents(search: SearchRequest):
                     collection_name=target_collection,
                     query_multivector=query_multivector,
                     query_dense=query_dense,
-                    limit=search.limit,
+                    limit=candidate_limit,
                     query_filter=query_filter,
                     with_payload=True,
                 )
@@ -201,7 +224,7 @@ async def search_documents(search: SearchRequest):
                     collection_name=target_collection,
                     query=query_dense,
                     using="dense",
-                    limit=search.limit,
+                    limit=candidate_limit,
                     with_payload=True,
                     score_threshold=dense_threshold,
                     query_filter=query_filter,
@@ -216,11 +239,13 @@ async def search_documents(search: SearchRequest):
                     collection_name=target_collection,
                     query=query_multivector,
                     using="colbert",
-                    limit=search.limit,
+                    limit=candidate_limit,
                     with_payload=True,
                     score_threshold=colbert_threshold,
                     filter=query_filter,
                 ).points
+
+        results = filter_document_points(parsed_query, results)[: search.limit]
 
         logger.info(
             f"Qdrant query execution took: {time.perf_counter() - start_qdrant:.3f}s"
@@ -261,12 +286,63 @@ async def search_documents(search: SearchRequest):
                     ]
                 )
 
-            related_faqs = await search_faqs(
-                query_multivector=query_multivector,
-                query_dense=query_dense,
-                faq_collection=faq_collection,
-                query_filter=faq_filter,
-            )
+            if parsed_query.has_text_query:
+                faq_candidates = await search_faqs(
+                    query_multivector=query_multivector,
+                    query_dense=query_dense,
+                    faq_collection=faq_collection,
+                    limit=candidate_limit,
+                    query_filter=faq_filter,
+                )
+                filtered_faqs = filter_faq_dicts(
+                    parsed_query,
+                    [
+                        {
+                            "id": faq.id,
+                            "question": faq.question,
+                            "answer": faq.answer,
+                            "score": faq.score,
+                            "source_documents": [
+                                source.model_dump()
+                                if hasattr(source, "model_dump")
+                                else source
+                                for source in faq.source_documents
+                            ],
+                        }
+                        for faq in faq_candidates
+                    ],
+                )[: search.limit]
+                related_faqs = [
+                    build_faq_response_from_payload(
+                        faq["id"],
+                        {
+                            "question": faq["question"],
+                            "answer": faq["answer"],
+                            "source_documents": faq.get("source_documents", []),
+                        },
+                        faq.get("score"),
+                    )
+                    for faq in filtered_faqs
+                ]
+            else:
+                related_faqs = [
+                    build_faq_response_from_payload(
+                        faq["id"],
+                        {
+                            "question": faq["question"],
+                            "answer": faq["answer"],
+                            "source_documents": faq.get("source_documents", []),
+                        },
+                        faq.get("score"),
+                    )
+                    for faq in scroll_matching_faqs(
+                        qdrant_client=qdrant_client,
+                        collection_name=faq_collection,
+                        parsed=parsed_query,
+                        limit=search.limit,
+                        scroll_filter=faq_filter,
+                    )
+                ]
 
         except Exception as e:
             logger.warning(f"Failed to search FAQs: {e}")
@@ -279,6 +355,7 @@ async def search_documents(search: SearchRequest):
                 search=search,
                 search_results=search_results,
                 related_faqs=related_faqs,
+                parsed_query=parsed_query,
                 query_dense=query_dense,
                 query_multivector=query_multivector,
                 query_filter=query_filter,
@@ -334,6 +411,7 @@ async def _boost_with_faq_sources(
     search: SearchRequest,
     search_results: List[SearchResult],
     related_faqs: list,
+    parsed_query,
     query_dense,
     query_multivector,
     query_filter,
@@ -411,6 +489,7 @@ async def _boost_with_faq_sources(
         with_payload=True,
         extra_prefetch=extra_prefetch,
     )
+    boosted_results = filter_document_points(parsed_query, boosted_results)[: search.limit]
 
     # Replace search results with boosted results
     search_results = []

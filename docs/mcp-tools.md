@@ -66,7 +66,7 @@ Searches the local knowledge base using triple-vector hybrid retrieval. When FAQ
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `query` | string | Yes | Search query text |
+| `query` | string | Yes | Search query text. Supports Google-dork style operators like `site:`, `inurl:`, `intitle:`, `filetype:`, `before:`, `after:`, and quoted phrases |
 | `collection_name` | string | No | Collection to search (default: main collection) |
 | `limit` | int | No | Max results (default: 10) |
 | `allowed_domains` | list[string] | No | Restrict search to specific domains (subdomains included), e.g. `["example.com"]` |
@@ -102,7 +102,7 @@ Searches the FAQ knowledge base using three-stage hybrid retrieval.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `query` | string | Yes | Search query text |
+| `query` | string | Yes | Search query text. Supports Google-dork style operators like `site:`, `inurl:`, `intitle:`, `filetype:`, `before:`, `after:`, and quoted phrases |
 | `limit` | int | No | Max results (default: 10) |
 | `allowed_domains` | list[string] | No | Restrict to FAQ entries sourced from specific domains |
 
