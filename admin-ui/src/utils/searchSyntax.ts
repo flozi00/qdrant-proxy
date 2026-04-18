@@ -1,4 +1,29 @@
-const FIELD_PATTERN = /([+-]?)(allintext|intext|allinurl|inurl|allintitle|intitle|site|filetype|ext|link|allinanchor|inanchor|allinpostauthor|inpostauthor|related|cache|before|after|numrange):("[^"]*"|\([^)]*\)|[^\s()]+)/gi;
+const DORK_OPERATORS = [
+  'allintext',
+  'intext',
+  'allinurl',
+  'inurl',
+  'allintitle',
+  'intitle',
+  'site',
+  'filetype',
+  'ext',
+  'link',
+  'allinanchor',
+  'inanchor',
+  'allinpostauthor',
+  'inpostauthor',
+  'related',
+  'cache',
+  'before',
+  'after',
+  'numrange',
+].join('|');
+
+const FIELD_PATTERN = new RegExp(
+  `([+-]?)(${DORK_OPERATORS}):("[^"]*"|\\([^)]*\\)|[^\\s()]+)`,
+  'gi',
+);
 
 const QUOTE_TRANSLATIONS: Record<string, string> = {
   '“': '"',

@@ -532,7 +532,7 @@ function KnowledgeBaseSearch() {
           onChange={(e) => setQuery(e.target.value)}
           onKeyDown={(e) => e.key === 'Enter' && search()}
           className="w-full px-6 py-4 text-lg border-2 border-gray-300 rounded-full focus:border-blue-500 focus:outline-none shadow-sm hover:shadow-md transition-shadow"
-          placeholder='Search documents and FAQ entries (supports site:, inurl:, intitle:, filetype:, before:, after:, "...")'
+          placeholder="Search documents and FAQ entries..."
         />
         <button onClick={() => void search()} className="absolute right-2 top-1/2 transform -translate-y-1/2 btn-primary px-6 py-2 rounded-full">
           Search
