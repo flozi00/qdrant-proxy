@@ -30,6 +30,7 @@ from services.hybrid_search import (
 )
 from services.facts import build_faq_response_from_payload
 from services.search_syntax import (
+    expanded_candidate_limit,
     filter_document_points,
     filter_faq_dicts,
     parse_google_dork_query,
@@ -87,7 +88,7 @@ async def search_documents(search: SearchRequest):
     target_collection = search.collection_name or settings.collection_name
     logger.info(f"Searching for: {search.query} in {target_collection}")
     parsed_query = parse_google_dork_query(search.query)
-    candidate_limit = min(max(search.limit * 5, search.limit + 20), 200)
+    candidate_limit = expanded_candidate_limit(search.limit)
 
     # Ensure collection exists (cached after first successful check).
     _ensure_collection_cached(target_collection)

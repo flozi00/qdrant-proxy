@@ -33,6 +33,12 @@ _FIELD_PATTERN = re.compile(
     flags=re.IGNORECASE,
 )
 
+SEARCH_CANDIDATE_MULTIPLIER = 5
+SEARCH_CANDIDATE_BUFFER = 20
+SEARCH_CANDIDATE_MAX_LIMIT = 200
+SCROLL_BATCH_MULTIPLIER = 3
+SCROLL_BATCH_MIN_LIMIT = 25
+
 
 def _dedupe(values: Iterable[str]) -> list[str]:
     seen: set[str] = set()
@@ -124,6 +130,20 @@ def _parse_free_terms(query: str) -> tuple[list[str], list[str]]:
             target.append(part)
 
     return _dedupe(positive_terms), _dedupe(negative_terms)
+
+
+def expanded_candidate_limit(limit: int) -> int:
+    return min(
+        max(limit * SEARCH_CANDIDATE_MULTIPLIER, limit + SEARCH_CANDIDATE_BUFFER),
+        SEARCH_CANDIDATE_MAX_LIMIT,
+    )
+
+
+def scroll_batch_limit(limit: int) -> int:
+    return min(
+        max(limit * SCROLL_BATCH_MULTIPLIER, SCROLL_BATCH_MIN_LIMIT),
+        SEARCH_CANDIDATE_MAX_LIMIT,
+    )
 
 
 @dataclass
@@ -257,9 +277,11 @@ def parse_google_dork_query(query: str) -> ParsedSearchQuery:
                 "excluded_content",
             )
         elif operator == "before":
-            parsed.before = _parse_date(raw_value) or parsed.before
+            if parsed_before := _parse_date(raw_value):
+                parsed.before = parsed_before
         elif operator == "after":
-            parsed.after = _parse_date(raw_value) or parsed.after
+            if parsed_after := _parse_date(raw_value):
+                parsed.after = parsed_after
         elif operator == "numrange":
             parsed.free_terms.extend(_split_clause_terms(raw_value))
 
@@ -482,7 +504,7 @@ def scroll_matching_documents(
 
     matches: list[Any] = []
     offset = None
-    batch_limit = max(limit * 5, 100)
+    batch_limit = scroll_batch_limit(limit)
 
     while len(matches) < limit:
         points, offset = qdrant_client.scroll(
@@ -523,7 +545,7 @@ def scroll_matching_faqs(
 
     matches: list[dict[str, Any]] = []
     offset = None
-    batch_limit = max(limit * 5, 100)
+    batch_limit = scroll_batch_limit(limit)
 
     while len(matches) < limit:
         points, offset = qdrant_client.scroll(

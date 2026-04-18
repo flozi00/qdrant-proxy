@@ -63,6 +63,7 @@ from services.hybrid_search import (
     search_faqs,
 )
 from services.search_syntax import (
+    expanded_candidate_limit,
     filter_document_points,
     filter_faq_dicts,
     parse_google_dork_query,
@@ -423,7 +424,7 @@ async def search_knowledge_base(
         faq_filter = _build_faq_doc_filter(allowed_doc_ids)
 
     faq_collection = get_faq_collection_name(target_collection)
-    candidate_limit = min(max(limit * 5, limit + 20), 200)
+    candidate_limit = expanded_candidate_limit(limit)
     query_multivector = None
     query_dense = None
 
@@ -683,7 +684,7 @@ async def search_faq_entries(
                 query_multivector=query_colbert,
                 query_dense=query_dense,
                 faq_collection=faq_collection,
-                limit=min(max(limit * 5, limit + 20), 200),
+                limit=expanded_candidate_limit(limit),
                 min_score=min_score,
                 query_filter=faq_filter,
                 as_dict=True,
