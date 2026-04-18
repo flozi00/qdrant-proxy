@@ -62,6 +62,14 @@ from services.hybrid_search import (
     execute_hybrid_search,
     search_faqs,
 )
+from services.search_syntax import (
+    expanded_candidate_limit,
+    filter_document_points,
+    filter_faq_dicts,
+    parse_google_dork_query,
+    scroll_matching_documents,
+    scroll_matching_faqs,
+)
 from starlette.middleware import Middleware
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
@@ -382,11 +390,17 @@ async def search_knowledge_base(
 
     target_collection = collection_name or settings.collection_name
     limit = max(1, min(50, limit))
+    parsed_query = parse_google_dork_query(query)
 
     # Ensure collection exists
     ensure_collection(target_collection)
 
-    normalized_allowed_domains = _normalize_allowed_domains(allowed_domains)
+    dork_allowed_domains = _normalize_allowed_domains(
+        [pattern for pattern in parsed_query.site_patterns if "*" not in pattern]
+    )
+    normalized_allowed_domains = _normalize_allowed_domains(
+        [*(allowed_domains or []), *dork_allowed_domains]
+    )
     allowed_doc_ids: Set[str] = set()
     document_filter = None
     faq_filter = None
@@ -409,23 +423,38 @@ async def search_knowledge_base(
         document_filter = _build_doc_id_filter(allowed_doc_ids)
         faq_filter = _build_faq_doc_filter(allowed_doc_ids)
 
-    # Encode query vectors once for the shared hybrid pipeline.
-    query_multivector, query_dense = await encode_hybrid_query(query)
-    # Search for related FAQs first (needed for document boosting)
     faq_collection = get_faq_collection_name(target_collection)
-    faqs = await search_faqs(
-        query_multivector=query_multivector,
-        query_dense=query_dense,
-        faq_collection=faq_collection,
-        query_filter=faq_filter,
-        as_dict=True,
-    )
+    candidate_limit = expanded_candidate_limit(limit)
+    query_multivector = None
+    query_dense = None
+
+    if parsed_query.has_text_query:
+        query_multivector, query_dense = await encode_hybrid_query(
+            parsed_query.semantic_query
+        )
+        faqs = await search_faqs(
+            query_multivector=query_multivector,
+            query_dense=query_dense,
+            faq_collection=faq_collection,
+            limit=candidate_limit,
+            query_filter=faq_filter,
+            as_dict=True,
+        )
+        faqs = filter_faq_dicts(parsed_query, faqs)[:limit]
+    else:
+        faqs = scroll_matching_faqs(
+            qdrant_client=qdrant_client,
+            collection_name=faq_collection,
+            parsed=parsed_query,
+            limit=limit,
+            scroll_filter=faq_filter,
+        )
 
     extra_prefetch = []
 
     # Boost documents from FAQ source URLs by adding them as extra prefetch
     boosted_doc_ids = set()
-    if faqs:
+    if faqs and query_dense is not None:
         faq_source_urls = set()
         for faq in faqs:
             for src in faq.get("source_documents") or []:
@@ -453,18 +482,28 @@ async def search_knowledge_base(
                     ),
                 )
 
-    effective_limit = limit + len(boosted_doc_ids)
+    effective_limit = candidate_limit + len(boosted_doc_ids)
 
-    results = execute_hybrid_search(
-        qdrant_client=qdrant_client,
-        collection_name=target_collection,
-        query_multivector=query_multivector,
-        query_dense=query_dense,
-        limit=effective_limit,
-        query_filter=document_filter,
-        with_payload=True,
-        extra_prefetch=extra_prefetch,
-    )
+    if parsed_query.has_text_query:
+        results = execute_hybrid_search(
+            qdrant_client=qdrant_client,
+            collection_name=target_collection,
+            query_multivector=query_multivector,
+            query_dense=query_dense,
+            limit=effective_limit,
+            query_filter=document_filter,
+            with_payload=True,
+            extra_prefetch=extra_prefetch,
+        )
+        results = filter_document_points(parsed_query, results)[:limit]
+    else:
+        results = scroll_matching_documents(
+            qdrant_client=qdrant_client,
+            collection_name=target_collection,
+            parsed=parsed_query,
+            limit=limit,
+            scroll_filter=document_filter,
+        )
 
     # Format document results
     documents = []
@@ -607,7 +646,13 @@ async def search_faq_entries(
 
     faq_collection = get_faq_collection_name(settings.collection_name)
     limit = max(1, min(50, limit))
-    normalized_allowed_domains = _normalize_allowed_domains(allowed_domains)
+    parsed_query = parse_google_dork_query(query)
+    dork_allowed_domains = _normalize_allowed_domains(
+        [pattern for pattern in parsed_query.site_patterns if "*" not in pattern]
+    )
+    normalized_allowed_domains = _normalize_allowed_domains(
+        [*(allowed_domains or []), *dork_allowed_domains]
+    )
 
     if not qdrant_client.collection_exists(faq_collection):
         return {"faqs": [], "total": 0, "message": "FAQ collection does not exist"}
@@ -631,16 +676,28 @@ async def search_faq_entries(
         faq_filter = _build_faq_doc_filter(allowed_doc_ids)
 
     try:
-        query_colbert, query_dense = await encode_hybrid_query(query)
-        faqs = await search_faqs(
-            query_multivector=query_colbert,
-            query_dense=query_dense,
-            faq_collection=faq_collection,
-            limit=limit,
-            min_score=min_score,
-            query_filter=faq_filter,
-            as_dict=True,
-        )
+        if parsed_query.has_text_query:
+            query_colbert, query_dense = await encode_hybrid_query(
+                parsed_query.semantic_query
+            )
+            faqs = await search_faqs(
+                query_multivector=query_colbert,
+                query_dense=query_dense,
+                faq_collection=faq_collection,
+                limit=expanded_candidate_limit(limit),
+                min_score=min_score,
+                query_filter=faq_filter,
+                as_dict=True,
+            )
+            faqs = filter_faq_dicts(parsed_query, faqs)[:limit]
+        else:
+            faqs = scroll_matching_faqs(
+                qdrant_client=qdrant_client,
+                collection_name=faq_collection,
+                parsed=parsed_query,
+                limit=limit,
+                scroll_filter=faq_filter,
+            )
 
         response = {"faqs": faqs, "total": len(faqs)}
         if normalized_allowed_domains:

@@ -19,6 +19,7 @@ import type {
   SearchDocument,
 } from '../types';
 import { urlToDocId } from '../utils';
+import { parseSearchSyntax } from '../utils/searchSyntax';
 import RecentDocumentsPanel from './RecentDocumentsPanel';
 import { FAQEntryDisplay, Modal, StarRating } from './ui';
 
@@ -82,13 +83,12 @@ function escapeRegex(text: string): string {
   return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
-function parseQueryTerms(query: string): string[] {
-  return query
-    .split(/\s+/)
-    .map((t) => t.trim())
-    .filter(Boolean)
-    .map((t) => t.replace(/^[^\p{L}\p{N}]+|[^\p{L}\p{N}]+$/gu, ''))
-    .filter(Boolean);
+function parseContentQueryTerms(query: string): string[] {
+  return parseSearchSyntax(query).contentTerms;
+}
+
+function parseUrlQueryTerms(query: string): string[] {
+  return parseSearchSyntax(query).urlTerms;
 }
 
 function countOccurrences(haystack: string, needle: string): number {
@@ -100,8 +100,8 @@ function countOccurrences(haystack: string, needle: string): number {
 }
 
 function analyzeQueryMatches(query: string, text: string): QueryMatchSummary {
-  const phrase = query.trim();
-  const terms = parseQueryTerms(phrase);
+  const terms = parseContentQueryTerms(query);
+  const phrase = terms.join(' ').trim();
   const uniqueTerms = Array.from(new Set(terms.map((t) => t.toLowerCase())));
   const phraseCount = countOccurrences(text, phrase);
   const termCounts = uniqueTerms.reduce<Record<string, number>>((acc, term) => {
@@ -139,15 +139,8 @@ function analyzeQueryMatches(query: string, text: string): QueryMatchSummary {
   };
 }
 
-function highlightByQuery(text: string, query: string): ReactNode[] {
-  const phrase = query.trim();
-  const terms = parseQueryTerms(phrase);
-  const patterns = Array.from(
-    new Set([
-      ...(phrase ? [phrase] : []),
-      ...terms,
-    ]),
-  )
+function highlightByTerms(text: string, terms: string[]): ReactNode[] {
+  const patterns = terms
     .filter(Boolean)
     .sort((a, b) => b.length - a.length);
 
@@ -166,15 +159,16 @@ function highlightByQuery(text: string, query: string): ReactNode[] {
   });
 }
 
+function highlightByQuery(text: string, query: string): ReactNode[] {
+  return highlightByTerms(text, parseContentQueryTerms(query));
+}
+
+function highlightUrlByQuery(text: string, query: string): ReactNode[] {
+  return highlightByTerms(text, parseUrlQueryTerms(query));
+}
+
 function buildHighlightPatterns(query: string): string[] {
-  const phrase = query.trim();
-  const terms = parseQueryTerms(phrase);
-  return Array.from(
-    new Set([
-      ...(phrase ? [phrase] : []),
-      ...terms,
-    ]),
-  )
+  return Array.from(new Set(parseContentQueryTerms(query)))
     .filter(Boolean)
     .sort((a, b) => b.length - a.length);
 }
@@ -570,6 +564,10 @@ function KnowledgeBaseSearch() {
           <span>results</span>
         </label>
       </div>
+
+      <p className="mt-2 text-xs text-gray-500">
+        Google-dork style filters are supported for search and rating, including <code>site:</code>, <code>inurl:</code>, <code>intitle:</code>, <code>filetype:</code>, <code>before:</code>, and <code>after:</code>.
+      </p>
 
       <div className="mt-3 p-3 bg-gray-50 border border-gray-200 rounded-lg">
         <div className="flex flex-wrap items-center gap-2">
@@ -1092,7 +1090,7 @@ function DocResult({
     <div className="bg-white p-4 rounded-lg shadow-sm border hover:shadow-md transition-shadow">
       <div className="flex justify-between items-start mb-2 gap-4">
         <a href={doc.url} target="_blank" rel="noreferrer" className="text-lg font-semibold text-blue-600 hover:underline block break-all flex-1 min-w-0">
-          {doc.url}
+          {highlightUrlByQuery(doc.url, searchQuery)}
         </a>
         <span className="text-xs px-2 py-1 bg-gray-100 text-gray-600 rounded flex-shrink-0">
           Score: {doc.score.toFixed(3)}
