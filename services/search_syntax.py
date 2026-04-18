@@ -209,47 +209,49 @@ def parse_google_dork_query(query: str) -> ParsedSearchQuery:
         raw_value = match.group("value")
         negative = prefix == "-"
 
-        def assign(values: Sequence[str], positive_attr: str, negative_attr: str) -> None:
+        def assign_filter_values(
+            values: Sequence[str], positive_attr: str, negative_attr: str
+        ) -> None:
             target_attr = negative_attr if negative else positive_attr
             current = getattr(parsed, target_attr)
             current.extend(values)
             setattr(parsed, target_attr, _dedupe(current))
 
         if operator in {"intext", "allintext"}:
-            assign(
+            assign_filter_values(
                 _split_clause_terms(raw_value, split_words=operator == "allintext"),
                 "content_any" if operator == "intext" else "content_all",
                 "excluded_content",
             )
         elif operator in {"intitle", "allintitle"}:
-            assign(
+            assign_filter_values(
                 _split_clause_terms(raw_value, split_words=operator == "allintitle"),
                 "title_any" if operator == "intitle" else "title_all",
                 "excluded_title",
             )
         elif operator in {"inurl", "allinurl", "related", "cache"}:
-            assign(
+            assign_filter_values(
                 _split_clause_terms(raw_value, split_words=operator == "allinurl"),
                 "url_any" if operator != "allinurl" else "url_all",
                 "excluded_url",
             )
         elif operator == "site":
-            assign(
+            assign_filter_values(
                 _split_clause_terms(raw_value),
                 "site_patterns",
                 "excluded_site_patterns",
             )
         elif operator in {"filetype", "ext"}:
             values = [value.lstrip(".").lower() for value in _split_clause_terms(raw_value)]
-            assign(values, "filetypes", "excluded_filetypes")
+            assign_filter_values(values, "filetypes", "excluded_filetypes")
         elif operator in {"link", "inanchor", "allinanchor"}:
-            assign(
+            assign_filter_values(
                 _split_clause_terms(raw_value, split_words=operator == "allinanchor"),
                 "link_any" if operator != "allinanchor" else "link_all",
                 "excluded_links",
             )
         elif operator in {"inpostauthor", "allinpostauthor"}:
-            assign(
+            assign_filter_values(
                 _split_clause_terms(raw_value, split_words=operator == "allinpostauthor"),
                 "content_any" if operator != "allinpostauthor" else "content_all",
                 "excluded_content",

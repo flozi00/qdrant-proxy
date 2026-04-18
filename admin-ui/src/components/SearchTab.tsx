@@ -140,11 +140,7 @@ function analyzeQueryMatches(query: string, text: string): QueryMatchSummary {
 }
 
 function highlightByTerms(text: string, terms: string[]): ReactNode[] {
-  const patterns = Array.from(
-    new Set([
-      ...terms,
-    ]),
-  )
+  const patterns = terms
     .filter(Boolean)
     .sort((a, b) => b.length - a.length);
 
