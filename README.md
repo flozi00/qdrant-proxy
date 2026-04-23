@@ -100,8 +100,6 @@ This repository includes GitHub Actions workflows that automatically:
 - Create semantic version tags (e.g., `v1.2.3` → `1.2.3`, `1.2`, `1`)
 - Tag branch images (e.g., `main`, `develop`, `feature-xyz`)
 - Add commit SHA tags for precise versioning
-- Clean up images when branches are deleted
-- Remove old SHA tags to keep the registry clean
 
 See [Docker Deployment Guide](docs/docker-deployment.md) for details.
 
