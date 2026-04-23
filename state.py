@@ -40,6 +40,8 @@ class AppState:
 
         # Maintenance Status tracking
         self.maintenance_tasks: dict = {}
+        self.faq_generation_runs: dict = {}
+        self.faq_generation_run_tasks: dict[str, asyncio.Task] = {}
 
         # Initialization flag
         self._initialized = False

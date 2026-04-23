@@ -10,11 +10,13 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { apiFetch } from '../api/client';
 import { useApp } from '../store';
 import type { MaintenanceTask, ModelConfig } from '../types';
+import FaqAgentRunsPanel from './FaqAgentRunsPanel';
 
 export default function MaintenanceTab() {
   return (
     <div className="bg-white rounded-lg shadow-md p-8">
       <h2 className="text-2xl font-bold text-gray-800 mb-6">⚙️ System Maintenance</h2>
+      <FaqAgentRunsPanel />
       <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
         <ReembedSection />
         <div className="space-y-6">

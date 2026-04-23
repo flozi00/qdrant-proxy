@@ -129,3 +129,88 @@ class LLMSearchRankingResponse(BaseModel):
     query: str
     model: str
     hints: List[LLMDocumentRankingHint] = Field(default_factory=list)
+
+
+class FAQAgentRunRequest(BaseModel):
+    """Request to start an automated FAQ generation/update run."""
+
+    collection_name: Optional[str] = Field(
+        None, description="Collection to process. Uses default collection when omitted."
+    )
+    limit_documents: int = Field(
+        50, ge=1, le=500, description="Maximum number of documents to handle in this run."
+    )
+    follow_links: bool = Field(
+        True, description="Whether linked indexed documents should be traversed."
+    )
+    max_hops: int = Field(
+        1, ge=0, le=3, description="Maximum hyperlink hops per processed document."
+    )
+    max_linked_documents: int = Field(
+        3,
+        ge=0,
+        le=10,
+        description="Maximum linked indexed documents to use as support per document.",
+    )
+    max_faqs_per_document: int = Field(
+        3,
+        ge=1,
+        le=10,
+        description="Maximum FAQ pairs the model should emit for a document.",
+    )
+    force_reprocess: bool = Field(
+        False,
+        description="Reprocess documents even when the stored content hash was already handled.",
+    )
+    remove_stale_faqs: bool = Field(
+        True,
+        description="Remove this document as a source from FAQs no longer regenerated in the run.",
+    )
+
+
+class FAQAgentRunResponse(BaseModel):
+    """Response returned when a FAQ generation run is started."""
+
+    run_id: str
+    collection_name: str
+    status: str
+    message: str
+
+
+class FAQAgentRunStatus(BaseModel):
+    """Current or completed status for a FAQ generation run."""
+
+    run_id: str
+    collection_name: str
+    status: str
+    limit_documents: int
+    follow_links: bool
+    max_hops: int
+    max_linked_documents: int
+    max_faqs_per_document: int
+    force_reprocess: bool
+    remove_stale_faqs: bool
+    cancel_requested: bool = False
+    documents_completed: int = 0
+    documents_processed: int = 0
+    documents_skipped: int = 0
+    documents_failed: int = 0
+    faqs_created: int = 0
+    faqs_merged: int = 0
+    faqs_refreshed: int = 0
+    faqs_reassigned: int = 0
+    faqs_removed_sources: int = 0
+    faqs_deleted: int = 0
+    current_document_id: Optional[str] = None
+    current_document_url: Optional[str] = None
+    handled_document_ids: List[str] = Field(default_factory=list)
+    recent_documents: List[Dict[str, Any]] = Field(default_factory=list)
+    start_time: str
+    end_time: Optional[str] = None
+    error: Optional[str] = None
+
+
+class FAQAgentRunsResponse(BaseModel):
+    """List response for FAQ generation runs."""
+
+    items: List[FAQAgentRunStatus] = Field(default_factory=list)

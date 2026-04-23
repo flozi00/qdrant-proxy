@@ -43,6 +43,15 @@ FAQ IDs are generated deterministically using `generate_faq_id()`: a UUID5 hash 
 
 FAQ extraction from text is handled by the separate **fact-ingestion** service (`services/fact-ingestion/`), not by the qdrant-proxy. The qdrant-proxy provides MCP tools for CRUD operations on FAQ entries (`create_faq_entry`, `search_faq_entries`, etc.), while the fact-ingestion service handles the LLM-based extraction workflow.
 
+## Indexed Document Graph Traversal
+
+Indexed documents may contain `hyperlinks`, and FAQ entries already keep `source_documents`. The proxy now uses those two relationships as a lightweight knowledge graph:
+
+- **FAQ -> source document** via `source_documents[].document_id` / `url`
+- **document -> linked document** via indexed `hyperlinks`
+
+Traversal is bounded and only follows links that already resolve to document IDs in the same Qdrant collection. The proxy does **not** fetch remote URLs during traversal.
+
 ## Multi-Source FAQ Tracking
 
 FAQ entries can accumulate evidence from multiple documents:
@@ -88,7 +97,8 @@ The admin UI provides a manual FAQ generation workflow where administrators can 
 
 ```mermaid
 flowchart TD
-    Select["Admin selects text\nin document preview"] --> Generate["POST /admin/documents/generate-faq\n(LLM generates Q&A)"]
+    Select["Admin selects text\nin document preview"] --> Expand["Follow indexed hyperlinks\nfor bounded hops"]
+    Expand --> Generate["POST /admin/documents/generate-faq\n(LLM generates Q&A)"]
     Generate --> Dedup["Semantic search existing FAQs\n(ColBERT + Dense)"]
     Dedup --> Review["Admin reviews generated Q&A\n+ potential duplicates"]
     Review --> Create["Create New FAQ\n(POST /admin/documents/submit-faq)"]
@@ -102,7 +112,10 @@ flowchart TD
   "selected_text": "The library is open Monday to Friday from 8:00 to 16:00.",
   "source_url": "https://example.com/hours",
   "document_id": "uuid-of-document",
-  "collection_name": "my-collection"
+  "collection_name": "my-collection",
+  "follow_links": true,
+  "max_hops": 1,
+  "max_linked_documents": 3
 }
 ```
 
@@ -112,6 +125,16 @@ flowchart TD
 {
   "question": "What are the library's opening hours?",
   "answer": "The library is open Monday to Friday from 8:00 to 16:00.",
+  "supporting_documents": [
+    {
+      "doc_id": "linked-doc-uuid",
+      "url": "https://example.com/contact",
+      "title": "Library Contact",
+      "hop_count": 1,
+      "via_url": "https://example.com/hours",
+      "content_preview": "..."
+    }
+  ],
   "duplicates": [
     {
       "id": "existing-faq-uuid",
@@ -124,6 +147,8 @@ flowchart TD
   ]
 }
 ```
+
+When `follow_links` is enabled, the selected excerpt remains the primary source of truth. Supporting linked documents are additional context only.
 
 ### Submit FAQ (Create New)
 
@@ -151,6 +176,86 @@ flowchart TD
 ```
 
 When merging, only the `source_url` and `document_id` are appended to the existing FAQ's `source_documents` list — the question and answer remain unchanged.
+
+## Triggerable FAQ Agent Runs
+
+The proxy now supports a background FAQ agent run that walks indexed documents, hops through indexed hyperlinks, generates FAQ pairs, upserts/merges them into the FAQ collection, and removes stale FAQ sources for the processed document when enabled.
+
+### Start a Run
+
+```
+POST /admin/faq-agent/runs
+Authorization: Bearer <QDRANT_PROXY_ADMIN_KEY>
+```
+
+```json
+{
+  "collection_name": "my-collection",
+  "limit_documents": 50,
+  "follow_links": true,
+  "max_hops": 1,
+  "max_linked_documents": 3,
+  "max_faqs_per_document": 3,
+  "force_reprocess": false,
+  "remove_stale_faqs": true
+}
+```
+
+### Poll Run Status
+
+```
+GET /admin/faq-agent/runs/{run_id}
+Authorization: Bearer <QDRANT_PROXY_ADMIN_KEY>
+```
+
+### Stop a Run
+
+```
+POST /admin/faq-agent/runs/{run_id}/stop
+Authorization: Bearer <QDRANT_PROXY_ADMIN_KEY>
+```
+
+Stopping is cooperative: the run is marked as `stopping` / `cancel_requested`, then exits cleanly and becomes `cancelled`.
+
+Typical status fields:
+
+- `documents_processed`, `documents_skipped`, `documents_failed`
+- `faqs_created`, `faqs_merged`, `faqs_refreshed`
+- `faqs_reassigned`, `faqs_removed_sources`, `faqs_deleted`
+- `cancel_requested`, `handled_document_ids`, and `recent_documents`
+
+### Per-Document Processing Marker
+
+Each processed document gets a `metadata.faq_agent` marker so future runs can skip unchanged documents unless `force_reprocess` is enabled.
+
+```json
+{
+  "faq_agent": {
+    "last_run_id": "run-uuid",
+    "last_processed_at": "2026-04-23T15:00:00+00:00",
+    "content_hash": "sha256...",
+    "status": "processed",
+    "reason": "faq_generation_complete",
+    "stats": {
+      "generated_faq_count": 3,
+      "faqs_created": 2,
+      "faqs_merged": 1
+    },
+    "supporting_document_ids": ["linked-doc-1", "linked-doc-2"]
+  }
+}
+```
+
+Within one run, linked documents discovered via graph hopping are queued once and not processed again if they are encountered later in the same run.
+
+## Agentic Knowledge Retrieval via MCP
+
+`search_knowledge_base` can now optionally return `related_documents` gathered by following indexed hyperlinks from:
+
+1. matched search documents
+2. documents referenced by matched FAQ entries
+
+This allows LLM clients to do bounded multi-hop retrieval over already indexed content without leaving the knowledge base.
 
 ## FAQ / KV Store
 

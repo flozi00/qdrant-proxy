@@ -186,6 +186,67 @@ export interface MaintenanceTask {
   error?: string;
 }
 
+export interface FAQAgentRecentDocument {
+  doc_id: string;
+  url?: string;
+  status: string;
+  generated_faq_count?: number;
+  error?: string;
+}
+
+export interface FAQAgentRunRequest {
+  collection_name?: string;
+  limit_documents: number;
+  follow_links: boolean;
+  max_hops: number;
+  max_linked_documents: number;
+  max_faqs_per_document: number;
+  force_reprocess: boolean;
+  remove_stale_faqs: boolean;
+}
+
+export interface FAQAgentRunResponse {
+  run_id: string;
+  collection_name: string;
+  status: string;
+  message: string;
+}
+
+export interface FAQAgentRunStatus {
+  run_id: string;
+  collection_name: string;
+  status: string;
+  limit_documents: number;
+  follow_links: boolean;
+  max_hops: number;
+  max_linked_documents: number;
+  max_faqs_per_document: number;
+  force_reprocess: boolean;
+  remove_stale_faqs: boolean;
+  cancel_requested: boolean;
+  documents_completed: number;
+  documents_processed: number;
+  documents_skipped: number;
+  documents_failed: number;
+  faqs_created: number;
+  faqs_merged: number;
+  faqs_refreshed: number;
+  faqs_reassigned: number;
+  faqs_removed_sources: number;
+  faqs_deleted: number;
+  current_document_id?: string | null;
+  current_document_url?: string | null;
+  handled_document_ids: string[];
+  recent_documents: FAQAgentRecentDocument[];
+  start_time: string;
+  end_time?: string | null;
+  error?: string | null;
+}
+
+export interface FAQAgentRunsResponse {
+  items: FAQAgentRunStatus[];
+}
+
 // --- Tab types ---
 
 export type TabName = 'search' | 'faq' | 'quality' | 'maintenance';

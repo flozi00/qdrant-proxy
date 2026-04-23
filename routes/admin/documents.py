@@ -6,7 +6,6 @@ Provides:
 - FAQ generation from selected text (LLM-powered)
 """
 
-import hashlib
 import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any, List, Optional
@@ -14,20 +13,18 @@ from typing import Any, List, Optional
 from auth import verify_admin_auth
 from config import settings
 from fastapi import APIRouter, Body, Depends, HTTPException, status
-from knowledge_graph import SourceDocument
 from pydantic import BaseModel, Field
 
 logger = logging.getLogger(__name__)
 from models import AdminDocumentItem, AdminDocumentsResponse
 from qdrant_client import models
-from services.facts import generate_faq_id, generate_faq_text, url_to_doc_id
+from services.facts import generate_faq_text, url_to_doc_id
+from services.faq_store import refresh_faq_source, upsert_faq_for_source
 from services.hybrid_search import encode_hybrid_query, execute_hybrid_search
-from services.qdrant_ops import ensure_faq_collection
 from state import get_app_state
 
 from services import (
-    encode_dense,
-    encode_document,
+    expand_indexed_document_graph,
     get_faq_collection_name,
 )
 
@@ -321,8 +318,23 @@ class GenerateFAQRequest(BaseModel):
 
     selected_text: str = Field(..., min_length=10, description="Text selected by the admin")
     source_url: str = Field(..., description="URL of the source document")
-    document_id: Optional[str] = Field(None, description="Document ID (UUID). Auto-computed from source_url if omitted.")
-    collection_name: Optional[str] = Field(None, description="Collection name (uses default if omitted)")
+    document_id: Optional[str] = Field(
+        None, description="Document ID (UUID). Auto-computed from source_url if omitted."
+    )
+    collection_name: Optional[str] = Field(
+        None, description="Collection name (uses default if omitted)"
+    )
+    follow_links: bool = Field(
+        True,
+        description="Follow indexed hyperlinks from the source document for extra context.",
+    )
+    max_hops: int = Field(1, ge=0, le=3, description="Maximum hyperlink hops")
+    max_linked_documents: int = Field(
+        3,
+        ge=0,
+        le=10,
+        description="Maximum linked indexed documents to add as supporting context.",
+    )
 
 
 class DuplicateCandidate(BaseModel):
@@ -342,6 +354,45 @@ class GenerateFAQResponse(BaseModel):
     question: str
     answer: str
     duplicates: List[DuplicateCandidate] = Field(default_factory=list)
+    supporting_documents: List["SupportingDocument"] = Field(default_factory=list)
+
+
+class SupportingDocument(BaseModel):
+    """Linked indexed document used as additional FAQ generation context."""
+
+    doc_id: str
+    url: str
+    title: Optional[str] = None
+    hop_count: int
+    via_url: Optional[str] = None
+    content_preview: str
+
+
+GenerateFAQResponse.model_rebuild()
+
+
+def _build_supporting_context_block(supporting_documents: List["SupportingDocument"]) -> str:
+    """Build a compact prompt block from linked supporting documents."""
+    if not supporting_documents:
+        return ""
+
+    blocks = []
+    for index, document in enumerate(supporting_documents, start=1):
+        via_url = document.via_url or "seed document"
+        title = document.title or "(untitled)"
+        blocks.append(
+            "\n".join(
+                [
+                    f"[Supporting document {index}]",
+                    f"URL: {document.url}",
+                    f"Title: {title}",
+                    f"Hop count: {document.hop_count}",
+                    f"Reached via: {via_url}",
+                    f"Content:\n{document.content_preview}",
+                ]
+            )
+        )
+    return "\n\n".join(blocks)
 
 
 class SubmitFAQRequest(BaseModel):
@@ -371,7 +422,37 @@ async def admin_generate_faq(
 
     base_collection = body.collection_name or COLLECTION_NAME
 
-    # 1. Call LLM to generate Q&A from selected text
+    app_state = get_app_state()
+    qdrant_client = app_state.qdrant_client
+    source_doc_id = body.document_id or url_to_doc_id(body.source_url)
+    graph_documents = []
+    if (
+        body.follow_links
+        and body.max_linked_documents > 0
+        and qdrant_client.collection_exists(base_collection)
+    ):
+        graph_documents = expand_indexed_document_graph(
+            qdrant_client=qdrant_client,
+            collection_name=base_collection,
+            seed_doc_ids=[source_doc_id],
+            max_hops=body.max_hops,
+            max_documents=body.max_linked_documents,
+        )
+
+    supporting_documents = [
+        SupportingDocument(
+            doc_id=document.doc_id,
+            url=document.url,
+            title=document.title,
+            hop_count=document.hop_count,
+            via_url=document.via_url,
+            content_preview=document.content[:1500],
+        )
+        for document in graph_documents
+    ]
+    supporting_context = _build_supporting_context_block(supporting_documents)
+
+    # 1. Call LLM to generate Q&A from selected text and linked supporting docs
     client = openai.AsyncOpenAI(
         base_url=settings.litellm_base_url,
         api_key=settings.litellm_api_key,
@@ -388,7 +469,10 @@ async def admin_generate_faq(
                         "You are a FAQ extraction assistant. Given a text excerpt from a webpage, "
                         "generate exactly ONE clear, concise question-answer pair that captures "
                         "the key information. The question should be how a user would naturally ask "
-                        "about this topic. The answer should be factual and self-contained.\n\n"
+                        "about this topic. The answer should be factual and self-contained.\n"
+                        "You may use supporting linked documents only when they clearly reinforce "
+                        "or clarify the selected text. If there is any conflict, prefer the selected "
+                        "text over linked context. Do not mention documents or hyperlinks explicitly.\n\n"
                         "Respond in EXACTLY this format (no extra text):\n"
                         "QUESTION: <the question>\n"
                         "ANSWER: <the answer>"
@@ -396,7 +480,15 @@ async def admin_generate_faq(
                 },
                 {
                     "role": "user",
-                    "content": f"Source URL: {body.source_url}\n\nSelected text:\n{body.selected_text}",
+                    "content": (
+                        f"Source URL: {body.source_url}\n\n"
+                        f"Selected text:\n{body.selected_text}"
+                        + (
+                            f"\n\nSupporting indexed documents discovered via hyperlinks:\n{supporting_context}"
+                            if supporting_context
+                            else ""
+                        )
+                    ),
                 },
             ],
         )
@@ -429,8 +521,6 @@ async def admin_generate_faq(
     # 2. Search for duplicate FAQs
     duplicates: List[DuplicateCandidate] = []
     faq_collection = get_faq_collection_name(base_collection)
-    app_state = get_app_state()
-    qdrant_client = app_state.qdrant_client
 
     if qdrant_client.collection_exists(faq_collection):
         try:
@@ -465,6 +555,7 @@ async def admin_generate_faq(
         question=question,
         answer=answer,
         duplicates=duplicates,
+        supporting_documents=supporting_documents,
     )
 
 
@@ -480,7 +571,6 @@ async def admin_submit_faq(
     """
     base_collection = body.collection_name or COLLECTION_NAME
     faq_collection = get_faq_collection_name(base_collection)
-    ensure_faq_collection(base_collection)
 
     # Auto-compute document_id from source_url if not provided
     doc_id = body.document_id or url_to_doc_id(body.source_url)
@@ -504,36 +594,23 @@ async def admin_submit_faq(
                 )
 
             payload = result[0].payload
-            existing_sources = payload.get("source_documents", [])
-            existing_doc_ids = {s.get("document_id") for s in existing_sources}
-
-            if doc_id not in existing_doc_ids:
-                existing_sources.append(
-                    SourceDocument(
-                        document_id=doc_id,
-                        url=body.source_url,
-                        extracted_at=now,
-                        confidence=1.0,
-                    ).model_dump()
-                )
-                qdrant_client.set_payload(
-                    collection_name=faq_collection,
-                    payload={
-                        "source_documents": existing_sources,
-                        "source_count": len(existing_sources),
-                        "aggregated_confidence": max(
-                            s.get("confidence", 1.0) for s in existing_sources
-                        ),
-                        "last_updated": now,
-                    },
-                    points=[body.merge_with_id],
-                )
+            action = refresh_faq_source(
+                qdrant_client,
+                faq_collection,
+                body.merge_with_id,
+                payload,
+                document_id=doc_id,
+                source_url=body.source_url,
+                confidence=1.0,
+                now=now,
+            )
 
             return {
                 "ok": True,
-                "action": "merged",
+                "action": "merged" if action == "merged" else "refreshed",
                 "faq_id": body.merge_with_id,
-                "source_count": len(existing_sources),
+                "source_count": len((payload or {}).get("source_documents", []))
+                + (1 if action == "merged" else 0),
             }
         except HTTPException:
             raise
@@ -543,51 +620,22 @@ async def admin_submit_faq(
 
     # Create new FAQ entry
     try:
-        faq_text = generate_faq_text(body.question, body.answer)
-        faq_id = generate_faq_id(body.question, body.answer)
-        question_hash = hashlib.md5(body.question.strip().lower().encode()).hexdigest()
-
-        colbert_vector = await encode_document(faq_text)
-        dense_vector = await encode_dense(faq_text)
-
-        payload = {
-            "question": body.question,
-            "answer": body.answer,
-            "question_hash": question_hash,
-            "source_documents": [
-                SourceDocument(
-                    document_id=doc_id,
-                    url=body.source_url,
-                    extracted_at=now,
-                    confidence=1.0,
-                ).model_dump()
-            ],
-            "source_count": 1,
-            "aggregated_confidence": 1.0,
-            "first_seen": now,
-            "last_updated": now,
-            "document_id": doc_id,
-        }
-
-        qdrant_client.upsert(
-            collection_name=faq_collection,
-            points=[
-                models.PointStruct(
-                    id=faq_id,
-                    vector={
-                        "colbert": colbert_vector,
-                        "dense": dense_vector,
-                    },
-                    payload=payload,
-                )
-            ],
+        result = await upsert_faq_for_source(
+            qdrant_client,
+            base_collection,
+            question=body.question,
+            answer=body.answer,
+            source_url=body.source_url,
+            document_id=doc_id,
+            confidence=1.0,
+            now=now,
         )
 
         logger.info(f"Admin created FAQ: {body.question[:80]}")
         return {
             "ok": True,
-            "action": "created",
-            "faq_id": faq_id,
+            "action": result["action"],
+            "faq_id": result["faq_id"],
             "question": body.question,
         }
     except Exception as e:

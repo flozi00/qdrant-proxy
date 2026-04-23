@@ -80,11 +80,13 @@ from state import get_app_state
 
 # Services - business logic functions
 from services import (
+    expand_indexed_document_graph,
     encode_dense,
     encode_document,
     enqueue_query,
     ensure_collection,
     ensure_feedback_collection,
+    extract_source_document_ids_from_faqs,
     get_faq_collection_name,
     get_feedback_collection_name,
     url_to_doc_id,
@@ -371,6 +373,9 @@ async def search_knowledge_base(
     limit: int = 10,
     collection_name: str | None = None,
     allowed_domains: Optional[List[str]] = None,
+    follow_links: bool = False,
+    max_hops: int = 1,
+    max_related_documents: int = 5,
 ) -> dict:
     """Search indexed documents and extracted FAQs from websites.
 
@@ -384,12 +389,18 @@ async def search_knowledge_base(
         collection_name: Optional collection to search (defaults to main collection)
         allowed_domains: Optional list of allowed domains to restrict both
             document and FAQ search scope (e.g. ["example.com", "docs.example.com"])
+        follow_links: Whether to follow indexed hyperlinks from matched
+            documents and FAQ source documents to gather related context.
+        max_hops: Maximum hyperlink hops when follow_links is enabled.
+        max_related_documents: Maximum linked indexed documents to return.
     """
     state = get_app_state()
     qdrant_client = state.qdrant_client
 
     target_collection = collection_name or settings.collection_name
     limit = max(1, min(50, limit))
+    max_hops = max(0, min(max_hops, 3))
+    max_related_documents = max(0, min(max_related_documents, 20))
     parsed_query = parse_google_dork_query(query)
 
     # Ensure collection exists
@@ -415,6 +426,7 @@ async def search_knowledge_base(
             return {
                 "faqs": [],
                 "documents": [],
+                "related_documents": [],
                 "total": 0,
                 "applied_allowed_domains": normalized_allowed_domains,
                 "message": "No documents matched allowed_domains",
@@ -524,9 +536,43 @@ async def search_knowledge_base(
             }
         )
 
+    related_documents = []
+    if follow_links and max_related_documents > 0:
+        seed_doc_ids = [
+            *[str(point.id) for point in results],
+            *extract_source_document_ids_from_faqs(faqs),
+        ]
+        graph_documents = expand_indexed_document_graph(
+            qdrant_client=qdrant_client,
+            collection_name=target_collection,
+            seed_doc_ids=seed_doc_ids,
+            max_hops=max_hops,
+            max_documents=max_related_documents,
+            allowed_doc_ids=allowed_doc_ids or None,
+            exclude_doc_ids={str(point.id) for point in results},
+        )
+        related_documents = [
+            {
+                "url": document.url,
+                "doc_id": document.doc_id,
+                "score": 0.0,
+                "content": document.content,
+                "metadata": {
+                    **document.metadata,
+                    "title": document.title,
+                    "graph_relation": document.relation,
+                    "graph_hop_count": document.hop_count,
+                    "graph_via_doc_id": document.via_doc_id,
+                    "graph_via_url": document.via_url,
+                },
+            }
+            for document in graph_documents
+        ]
+
     response = {
         "faqs": faqs,
         "documents": documents,
+        "related_documents": related_documents,
     }
 
     try:
