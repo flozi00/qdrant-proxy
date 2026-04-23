@@ -191,6 +191,10 @@ export interface FAQAgentRecentDocument {
   url?: string;
   status: string;
   generated_faq_count?: number;
+   retrieval_steps?: number;
+   search_queries?: number;
+   supporting_document_count?: number;
+   finish_reason?: string;
   error?: string;
 }
 
@@ -200,6 +204,9 @@ export interface FAQAgentRunRequest {
   follow_links: boolean;
   max_hops: number;
   max_linked_documents: number;
+   max_retrieval_steps: number;
+   max_search_queries: number;
+   max_search_results: number;
   max_faqs_per_document: number;
   force_reprocess: boolean;
   remove_stale_faqs: boolean;
@@ -220,6 +227,9 @@ export interface FAQAgentRunStatus {
   follow_links: boolean;
   max_hops: number;
   max_linked_documents: number;
+   max_retrieval_steps: number;
+   max_search_queries: number;
+   max_search_results: number;
   max_faqs_per_document: number;
   force_reprocess: boolean;
   remove_stale_faqs: boolean;
@@ -234,6 +244,9 @@ export interface FAQAgentRunStatus {
   faqs_reassigned: number;
   faqs_removed_sources: number;
   faqs_deleted: number;
+   retrieval_steps: number;
+   search_queries: number;
+   supporting_documents_inspected: number;
   current_document_id?: string | null;
   current_document_url?: string | null;
   handled_document_ids: string[];

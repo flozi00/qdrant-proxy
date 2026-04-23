@@ -49,6 +49,9 @@ export default function FaqAgentRunsPanel() {
     follow_links: true,
     max_hops: 1,
     max_linked_documents: 3,
+    max_retrieval_steps: 6,
+    max_search_queries: 2,
+    max_search_results: 5,
     max_faqs_per_document: 3,
     force_reprocess: false,
     remove_stale_faqs: true,
@@ -236,8 +239,11 @@ export default function FaqAgentRunsPanel() {
           <StatCell label="Reassigned" value={run.faqs_reassigned} />
           <StatCell label="Source removals" value={run.faqs_removed_sources} />
           <StatCell label="Deleted" value={run.faqs_deleted} />
+          <StatCell label="Retrieval steps" value={run.retrieval_steps} />
+          <StatCell label="Searches" value={run.search_queries} />
+          <StatCell label="Support docs" value={run.supporting_documents_inspected} />
           <StatCell label="Max hops" value={run.max_hops} />
-          <StatCell label="Linked docs" value={run.max_linked_documents} />
+          <StatCell label="Support cap" value={run.max_linked_documents} />
           <StatCell label="FAQ/doc" value={run.max_faqs_per_document} />
         </div>
 
@@ -248,6 +254,9 @@ export default function FaqAgentRunsPanel() {
             </div>
             <div className="text-sm text-gray-700 space-y-1">
               <div>Follow links: {run.follow_links ? 'Yes' : 'No'}</div>
+              <div>Retrieval steps / doc: {run.max_retrieval_steps}</div>
+              <div>Searches / doc: {run.max_search_queries}</div>
+              <div>Results / search: {run.max_search_results}</div>
               <div>Force reprocess: {run.force_reprocess ? 'Yes' : 'No'}</div>
               <div>Remove stale FAQs: {run.remove_stale_faqs ? 'Yes' : 'No'}</div>
               <div>Handled documents: {run.handled_document_ids.length}</div>
@@ -276,6 +285,14 @@ export default function FaqAgentRunsPanel() {
                       {typeof entry.generated_faq_count === 'number' && (
                         <div className="text-xs text-gray-600">Generated FAQs: {entry.generated_faq_count}</div>
                       )}
+                      {typeof entry.retrieval_steps === 'number' && (
+                        <div className="text-xs text-gray-600">
+                          Retrieval: {entry.retrieval_steps} steps, {entry.search_queries ?? 0} searches, {entry.supporting_document_count ?? 0} support docs
+                        </div>
+                      )}
+                      {entry.finish_reason && (
+                        <div className="text-xs text-gray-500">Finish reason: {entry.finish_reason}</div>
+                      )}
                       {entry.error && <div className="text-xs text-red-600">{entry.error}</div>}
                     </div>
                   ))}
@@ -295,7 +312,7 @@ export default function FaqAgentRunsPanel() {
         <div>
           <h3 className="text-lg font-bold text-purple-800 mb-1">🤖 FAQ Agent Runs</h3>
           <p className="text-sm text-purple-700">
-            Start automated FAQ generation runs, monitor live progress, and stop active runs cleanly.
+            Start agentic FAQ runs, monitor live progress, and stop active runs cleanly.
           </p>
         </div>
         <button onClick={() => loadRuns()} className="btn-secondary text-sm self-start">
@@ -343,11 +360,32 @@ export default function FaqAgentRunsPanel() {
               onChange={handleNumberField('max_hops')}
             />
             <NumberField
-              label="Linked docs / source"
+              label="Support docs / source"
               value={form.max_linked_documents}
               min={0}
               max={10}
               onChange={handleNumberField('max_linked_documents')}
+            />
+            <NumberField
+              label="Retrieval steps / source"
+              value={form.max_retrieval_steps}
+              min={1}
+              max={20}
+              onChange={handleNumberField('max_retrieval_steps')}
+            />
+            <NumberField
+              label="Searches / source"
+              value={form.max_search_queries}
+              min={0}
+              max={10}
+              onChange={handleNumberField('max_search_queries')}
+            />
+            <NumberField
+              label="Results / search"
+              value={form.max_search_results}
+              min={1}
+              max={10}
+              onChange={handleNumberField('max_search_results')}
             />
             <NumberField
               label="FAQs / document"
@@ -359,7 +397,7 @@ export default function FaqAgentRunsPanel() {
 
             <label className="flex items-center gap-2 text-sm text-gray-700">
               <input type="checkbox" checked={form.follow_links} onChange={handleCheckboxField('follow_links')} />
-              <span>Follow linked indexed documents</span>
+              <span>Let the agent follow indexed hyperlinks</span>
             </label>
             <label className="flex items-center gap-2 text-sm text-gray-700">
               <input type="checkbox" checked={form.force_reprocess} onChange={handleCheckboxField('force_reprocess')} />

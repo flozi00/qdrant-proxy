@@ -4,13 +4,18 @@ import pytest
 
 from services import faq_agent as faq_agent_module
 from services import faq_store as faq_store_module
+from services.document_graph import GraphDocument
+from services.facts import url_to_doc_id
 from services.faq_agent import (
+    FAQAgentDecision,
+    FAQAgentDocument,
+    FAQAgentSearchCandidate,
     build_faq_agent_run_state,
     document_needs_processing,
+    generate_agentic_supporting_documents_for_document,
     request_run_cancellation,
 )
 from services.faq_store import GeneratedFAQ
-from services.facts import url_to_doc_id
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -46,7 +51,10 @@ class _FakeQdrantClient:
 
     def retrieve(self, collection_name, ids, with_payload=True):
         return [
-            SimpleNamespace(id=point_id, payload=self.collections[collection_name][point_id]["payload"])
+            SimpleNamespace(
+                id=point_id,
+                payload=self.collections[collection_name][point_id]["payload"],
+            )
             for point_id in ids
             if point_id in self.collections.get(collection_name, {})
         ]
@@ -108,6 +116,24 @@ class _FakeQdrantClient:
             self.collections.get(collection_name, {}).pop(point_id, None)
 
 
+def _build_run_state(**overrides):
+    defaults = {
+        "collection_name": "docs",
+        "limit_documents": 10,
+        "follow_links": True,
+        "max_hops": 1,
+        "max_linked_documents": 3,
+        "max_retrieval_steps": 6,
+        "max_search_queries": 2,
+        "max_search_results": 5,
+        "max_faqs_per_document": 3,
+        "force_reprocess": False,
+        "remove_stale_faqs": True,
+    }
+    defaults.update(overrides)
+    return build_faq_agent_run_state(**defaults)
+
+
 def test_document_needs_processing_uses_hash_and_force_override():
     payload = {
         "content": "Document text",
@@ -133,16 +159,7 @@ def test_document_needs_processing_uses_hash_and_force_override():
 
 
 def test_request_run_cancellation_marks_active_run_stopping():
-    run_state = build_faq_agent_run_state(
-        collection_name="docs",
-        limit_documents=10,
-        follow_links=True,
-        max_hops=1,
-        max_linked_documents=3,
-        max_faqs_per_document=3,
-        force_reprocess=False,
-        remove_stale_faqs=True,
-    )
+    run_state = _build_run_state()
     run_state["status"] = "in-progress"
 
     status = request_run_cancellation(run_state)
@@ -216,11 +233,130 @@ async def test_sync_generated_faqs_reassigns_source_when_answer_changes(monkeypa
 
 
 @pytest.mark.anyio
-async def test_execute_faq_generation_run_hops_and_marks_documents(monkeypatch):
+async def test_generate_agentic_supporting_documents_can_search_inspect_and_follow_link(
+    monkeypatch,
+):
     url_a = "https://docs.example.com/a"
     url_b = "https://docs.example.com/b"
+    url_c = "https://docs.example.com/c"
+    doc_b_id = url_to_doc_id(url_b)
+    doc_c_id = url_to_doc_id(url_c)
+    client = _FakeQdrantClient(
+        {
+            "docs": {
+                doc_b_id: {
+                    "payload": {
+                        "url": url_b,
+                        "title": "Doc B",
+                        "content": "Beta policy details.",
+                        "content_hash": "hash-b",
+                        "hyperlinks": [url_c],
+                        "metadata": {},
+                    }
+                },
+                doc_c_id: {
+                    "payload": {
+                        "url": url_c,
+                        "title": "Doc C",
+                        "content": "Gamma implementation details.",
+                        "content_hash": "hash-c",
+                        "hyperlinks": [],
+                        "metadata": {},
+                    }
+                },
+            }
+        }
+    )
+    document = FAQAgentDocument(
+        doc_id=url_to_doc_id(url_a),
+        url=url_a,
+        title="Doc A",
+        content="Alpha overview referring to policy details.",
+        metadata={},
+        content_hash="hash-a",
+        hyperlinks=[],
+    )
+
+    decisions = iter(
+        [
+            FAQAgentDecision(
+                action="search",
+                reason="Need the policy document first.",
+                query="policy details for alpha overview",
+            ),
+            FAQAgentDecision(
+                action="inspect_document",
+                reason="Inspect the best search hit.",
+                target_doc_id=doc_b_id,
+            ),
+            FAQAgentDecision(
+                action="follow_link",
+                reason="Follow the referenced implementation page.",
+                source_doc_id=doc_b_id,
+                target_doc_id=doc_c_id,
+                target_url=url_c,
+            ),
+            FAQAgentDecision(
+                action="finish",
+                reason="Enough evidence has been gathered.",
+            ),
+        ]
+    )
+
+    async def fake_decision(*args, **kwargs):
+        return next(decisions)
+
+    async def fake_search(*args, **kwargs):
+        return [
+            FAQAgentSearchCandidate(
+                doc_id=doc_b_id,
+                url=url_b,
+                title="Doc B",
+                score=0.91,
+                query=kwargs["query"],
+                content_preview="Beta policy details.",
+            )
+        ]
+
+    monkeypatch.setattr(
+        faq_agent_module,
+        "request_agentic_retrieval_decision",
+        fake_decision,
+    )
+    monkeypatch.setattr(
+        faq_agent_module,
+        "search_documents_for_agent",
+        fake_search,
+    )
+
+    supporting_documents, stats = await generate_agentic_supporting_documents_for_document(
+        document,
+        qdrant_client=client,
+        collection_name="docs",
+        follow_links=True,
+        max_hops=1,
+        max_supporting_documents=3,
+        max_retrieval_steps=6,
+        max_search_queries=2,
+        max_search_results=5,
+    )
+
+    assert [item.doc_id for item in supporting_documents] == [doc_b_id, doc_c_id]
+    assert stats["retrieval_steps"] == 4
+    assert stats["search_queries"] == 1
+    assert stats["supporting_document_count"] == 2
+    assert stats["link_follow_count"] == 1
+    assert stats["finish_reason"] == "agent_finished"
+
+
+@pytest.mark.anyio
+async def test_execute_faq_generation_run_queues_only_agent_fetched_documents(monkeypatch):
+    url_a = "https://docs.example.com/a"
+    url_b = "https://docs.example.com/b"
+    url_c = "https://docs.example.com/c"
     doc_a_id = url_to_doc_id(url_a)
     doc_b_id = url_to_doc_id(url_b)
+    doc_c_id = url_to_doc_id(url_c)
     client = _FakeQdrantClient(
         {
             "docs": {
@@ -230,7 +366,7 @@ async def test_execute_faq_generation_run_hops_and_marks_documents(monkeypatch):
                         "title": "Doc A",
                         "content": "Alpha content",
                         "content_hash": "hash-a",
-                        "hyperlinks": [url_b],
+                        "hyperlinks": [url_c],
                         "metadata": {},
                     }
                 },
@@ -244,9 +380,55 @@ async def test_execute_faq_generation_run_hops_and_marks_documents(monkeypatch):
                         "metadata": {},
                     }
                 },
+                doc_c_id: {
+                    "payload": {
+                        "url": url_c,
+                        "title": "Doc C",
+                        "content": "Gamma content",
+                        "content_hash": "hash-c",
+                        "hyperlinks": [],
+                        "metadata": {},
+                    }
+                },
             }
         }
     )
+
+    async def fake_agentic_support(document, **kwargs):
+        if document.doc_id == doc_a_id:
+            return (
+                [
+                    GraphDocument(
+                        doc_id=doc_b_id,
+                        url=url_b,
+                        title="Doc B",
+                        content="Beta content",
+                        metadata={},
+                        hyperlinks=[],
+                        hop_count=0,
+                        relation="search",
+                    )
+                ],
+                {
+                    "retrieval_steps": 2,
+                    "search_queries": 1,
+                    "supporting_document_count": 1,
+                    "link_follow_count": 0,
+                    "search_candidate_count": 1,
+                    "finish_reason": "agent_finished",
+                },
+            )
+        return (
+            [],
+            {
+                "retrieval_steps": 1,
+                "search_queries": 0,
+                "supporting_document_count": 0,
+                "link_follow_count": 0,
+                "search_candidate_count": 0,
+                "finish_reason": "agent_finished",
+            },
+        )
 
     async def fake_generate(document, supporting_documents, **kwargs):
         return [
@@ -267,10 +449,15 @@ async def test_execute_faq_generation_run_hops_and_marks_documents(monkeypatch):
             "faqs_deleted": 0,
         }
 
-        monkeypatch.setattr(
-            faq_agent_module,
-            "collect_seed_document_ids",
+    monkeypatch.setattr(
+        faq_agent_module,
+        "collect_seed_document_ids",
         lambda qdrant_client, collection_name, limit_documents: [doc_a_id],
+    )
+    monkeypatch.setattr(
+        faq_agent_module,
+        "generate_agentic_supporting_documents_for_document",
+        fake_agentic_support,
     )
     monkeypatch.setattr(
         faq_agent_module,
@@ -283,16 +470,7 @@ async def test_execute_faq_generation_run_hops_and_marks_documents(monkeypatch):
         fake_sync,
     )
 
-    run_state = build_faq_agent_run_state(
-        collection_name="docs",
-        limit_documents=2,
-        follow_links=True,
-        max_hops=1,
-        max_linked_documents=2,
-        max_faqs_per_document=2,
-        force_reprocess=False,
-        remove_stale_faqs=True,
-    )
+    run_state = _build_run_state(limit_documents=3, max_linked_documents=2)
 
     await faq_agent_module.execute_faq_generation_run(run_state, client)
 
@@ -300,13 +478,13 @@ async def test_execute_faq_generation_run_hops_and_marks_documents(monkeypatch):
     assert run_state["documents_completed"] == 2
     assert run_state["documents_processed"] == 2
     assert set(run_state["handled_document_ids"]) == {doc_a_id, doc_b_id}
+    assert doc_c_id not in run_state["handled_document_ids"]
+    assert run_state["retrieval_steps"] == 3
+    assert run_state["search_queries"] == 1
+    assert run_state["supporting_documents_inspected"] == 1
     assert (
-        client.collections["docs"][doc_a_id]["payload"]["metadata"]["faq_agent"]["last_run_id"]
-        == run_state["run_id"]
-    )
-    assert (
-        client.collections["docs"][doc_b_id]["payload"]["metadata"]["faq_agent"]["last_run_id"]
-        == run_state["run_id"]
+        client.collections["docs"][doc_a_id]["payload"]["metadata"]["faq_agent"]["supporting_document_ids"]
+        == [doc_b_id]
     )
 
 
@@ -336,16 +514,7 @@ async def test_execute_faq_generation_run_honors_pre_requested_cancellation(monk
         lambda qdrant_client, collection_name, limit_documents: [doc_id],
     )
 
-    run_state = build_faq_agent_run_state(
-        collection_name="docs",
-        limit_documents=1,
-        follow_links=True,
-        max_hops=1,
-        max_linked_documents=1,
-        max_faqs_per_document=1,
-        force_reprocess=False,
-        remove_stale_faqs=True,
-    )
+    run_state = _build_run_state(limit_documents=1, max_linked_documents=1)
     run_state["cancel_requested"] = True
 
     await faq_agent_module.execute_faq_generation_run(run_state, client)

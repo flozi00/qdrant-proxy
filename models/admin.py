@@ -150,7 +150,25 @@ class FAQAgentRunRequest(BaseModel):
         3,
         ge=0,
         le=10,
-        description="Maximum linked indexed documents to use as support per document.",
+        description="Maximum supporting documents the agent may inspect per source document.",
+    )
+    max_retrieval_steps: int = Field(
+        6,
+        ge=1,
+        le=20,
+        description="Maximum retrieval decisions the agent may take per source document.",
+    )
+    max_search_queries: int = Field(
+        2,
+        ge=0,
+        le=10,
+        description="Maximum semantic search actions the agent may issue per source document.",
+    )
+    max_search_results: int = Field(
+        5,
+        ge=1,
+        le=10,
+        description="Maximum search candidates returned for each agent-issued search query.",
     )
     max_faqs_per_document: int = Field(
         3,
@@ -187,6 +205,9 @@ class FAQAgentRunStatus(BaseModel):
     follow_links: bool
     max_hops: int
     max_linked_documents: int
+    max_retrieval_steps: int
+    max_search_queries: int
+    max_search_results: int
     max_faqs_per_document: int
     force_reprocess: bool
     remove_stale_faqs: bool
@@ -201,6 +222,9 @@ class FAQAgentRunStatus(BaseModel):
     faqs_reassigned: int = 0
     faqs_removed_sources: int = 0
     faqs_deleted: int = 0
+    retrieval_steps: int = 0
+    search_queries: int = 0
+    supporting_documents_inspected: int = 0
     current_document_id: Optional[str] = None
     current_document_url: Optional[str] = None
     handled_document_ids: List[str] = Field(default_factory=list)

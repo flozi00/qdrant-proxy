@@ -179,7 +179,15 @@ When merging, only the `source_url` and `document_id` are appended to the existi
 
 ## Triggerable FAQ Agent Runs
 
-The proxy now supports a background FAQ agent run that walks indexed documents, hops through indexed hyperlinks, generates FAQ pairs, upserts/merges them into the FAQ collection, and removes stale FAQ sources for the processed document when enabled.
+The proxy now supports a background **agentic** FAQ run. For each source document, the model can decide just in time whether to:
+
+1. issue a custom semantic search
+2. inspect one of the returned documents
+3. follow a specific indexed hyperlink
+4. stop retrieval and generate FAQs from the gathered evidence
+
+Only documents the agent actually inspects are used as support and queued later in the same run.
+`max_linked_documents` now acts as the total supporting-document budget per source document, regardless of whether those documents came from hyperlink hops or custom searches.
 
 ### Start a Run
 
@@ -195,6 +203,9 @@ Authorization: Bearer <QDRANT_PROXY_ADMIN_KEY>
   "follow_links": true,
   "max_hops": 1,
   "max_linked_documents": 3,
+  "max_retrieval_steps": 6,
+  "max_search_queries": 2,
+  "max_search_results": 5,
   "max_faqs_per_document": 3,
   "force_reprocess": false,
   "remove_stale_faqs": true
@@ -222,6 +233,7 @@ Typical status fields:
 - `documents_processed`, `documents_skipped`, `documents_failed`
 - `faqs_created`, `faqs_merged`, `faqs_refreshed`
 - `faqs_reassigned`, `faqs_removed_sources`, `faqs_deleted`
+- `retrieval_steps`, `search_queries`, `supporting_documents_inspected`
 - `cancel_requested`, `handled_document_ids`, and `recent_documents`
 
 ### Per-Document Processing Marker
@@ -237,6 +249,11 @@ Each processed document gets a `metadata.faq_agent` marker so future runs can sk
     "status": "processed",
     "reason": "faq_generation_complete",
     "stats": {
+      "retrieval_steps": 4,
+      "search_queries": 1,
+      "supporting_document_count": 2,
+      "link_follow_count": 1,
+      "finish_reason": "agent_finished",
       "generated_faq_count": 3,
       "faqs_created": 2,
       "faqs_merged": 1
@@ -246,7 +263,7 @@ Each processed document gets a `metadata.faq_agent` marker so future runs can sk
 }
 ```
 
-Within one run, linked documents discovered via graph hopping are queued once and not processed again if they are encountered later in the same run.
+Within one run, only documents actually fetched by the agent are queued once and not processed again if they are encountered later in the same run.
 
 ## Agentic Knowledge Retrieval via MCP
 
