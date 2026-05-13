@@ -1,7 +1,6 @@
 """Shared FAQ storage helpers for create/update/reconcile workflows."""
 
 import hashlib
-from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Iterable, Optional
 
@@ -10,16 +9,7 @@ from qdrant_client import QdrantClient, models
 
 from .embedding import encode_dense, encode_document
 from .facts import generate_faq_id, generate_faq_text
-from .qdrant_ops import ensure_faq_collection, get_faq_collection_name
-
-
-@dataclass(frozen=True)
-class GeneratedFAQ:
-    """Structured FAQ candidate emitted by automated generation."""
-
-    question: str
-    answer: str
-    confidence: float = 1.0
+from .qdrant_ops import ensure_faq_collection
 
 
 def question_hash_for_text(question: str) -> str:
@@ -284,117 +274,4 @@ def remove_source_from_faq(
         "success": True,
         "action": "source_removed",
         "source_count": len(remaining_sources),
-    }
-
-
-async def sync_generated_faqs_for_document(
-    qdrant_client: QdrantClient,
-    base_collection: str,
-    *,
-    document_id: str,
-    source_url: str,
-    generated_faqs: Iterable[GeneratedFAQ],
-    remove_stale_faqs: bool = True,
-    now: Optional[str] = None,
-) -> dict[str, Any]:
-    """Sync generated FAQs for a document and clean up stale document sources."""
-    faq_collection = ensure_faq_collection(base_collection, qdrant_client=qdrant_client)
-    timestamp = now or datetime.now().isoformat()
-    existing_points = list_document_faq_points(qdrant_client, faq_collection, document_id)
-    existing_by_question_hash: dict[str, Any] = {}
-
-    for point in existing_points:
-        payload = point.payload or {}
-        question_hash = payload.get("question_hash") or question_hash_for_text(
-            payload.get("question", "")
-        )
-        existing_by_question_hash.setdefault(question_hash, point)
-
-    normalized_generated: dict[str, GeneratedFAQ] = {}
-    for generated in generated_faqs:
-        question = generated.question.strip()
-        answer = generated.answer.strip()
-        if not question or not answer:
-            continue
-        question_hash = question_hash_for_text(question)
-        current = normalized_generated.get(question_hash)
-        if current is None or generated.confidence >= current.confidence:
-            normalized_generated[question_hash] = GeneratedFAQ(
-                question=question,
-                answer=answer,
-                confidence=max(0.0, min(1.0, float(generated.confidence))),
-            )
-
-    retained_faq_ids: set[str] = set()
-    stats = {
-        "faqs_created": 0,
-        "faqs_merged": 0,
-        "faqs_refreshed": 0,
-        "faqs_reassigned": 0,
-        "faqs_removed_sources": 0,
-        "faqs_deleted": 0,
-    }
-
-    for question_hash, generated in normalized_generated.items():
-        existing_point = existing_by_question_hash.get(question_hash)
-        result = await upsert_faq_for_source(
-            qdrant_client,
-            base_collection,
-            question=generated.question,
-            answer=generated.answer,
-            source_url=source_url,
-            document_id=document_id,
-            confidence=generated.confidence,
-            now=timestamp,
-        )
-        retained_faq_ids.add(result["faq_id"])
-
-        if result["action"] == "created":
-            stats["faqs_created"] += 1
-        elif result["action"] == "merged":
-            stats["faqs_merged"] += 1
-        elif result["action"] == "refreshed":
-            stats["faqs_refreshed"] += 1
-
-        if existing_point and str(existing_point.id) != result["faq_id"]:
-            remove_result = remove_source_from_faq(
-                qdrant_client,
-                faq_collection,
-                str(existing_point.id),
-                document_id,
-                now=timestamp,
-            )
-            if remove_result.get("action") == "faq_deleted":
-                stats["faqs_deleted"] += 1
-            elif remove_result.get("action") == "source_removed":
-                stats["faqs_removed_sources"] += 1
-            stats["faqs_reassigned"] += 1
-
-    if remove_stale_faqs:
-        for point in existing_points:
-            point_id = str(point.id)
-            if point_id in retained_faq_ids:
-                continue
-            payload = point.payload or {}
-            question_hash = payload.get("question_hash") or question_hash_for_text(
-                payload.get("question", "")
-            )
-            if question_hash in normalized_generated:
-                continue
-            remove_result = remove_source_from_faq(
-                qdrant_client,
-                faq_collection,
-                point_id,
-                document_id,
-                now=timestamp,
-            )
-            if remove_result.get("action") == "faq_deleted":
-                stats["faqs_deleted"] += 1
-            elif remove_result.get("action") == "source_removed":
-                stats["faqs_removed_sources"] += 1
-
-    return {
-        "faq_collection": get_faq_collection_name(base_collection),
-        "retained_faq_ids": sorted(retained_faq_ids),
-        **stats,
     }
