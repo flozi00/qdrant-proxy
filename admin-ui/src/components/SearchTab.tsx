@@ -309,6 +309,12 @@ function KnowledgeBaseSearch() {
   const [ratingSessionId, setRatingSessionId] = useState('');
   const lastQuery = useRef('');
 
+  // Batch queue processing state
+  const [batchCount, setBatchCount] = useState(10);
+  const [batchRunning, setBatchRunning] = useState(false);
+  const [batchProgress, setBatchProgress] = useState<{ done: number; total: number; current: string; errors: number } | null>(null);
+  const batchAbortRef = useRef(false);
+
   // FAQ generation state for preview panel
   const [previewSelectedText, setPreviewSelectedText] = useState('');
   const [previewFaqModal, setPreviewFaqModal] = useState(false);
@@ -445,6 +451,52 @@ function KnowledgeBaseSearch() {
     }
   }, [selectedQueueId, queuedQueries, search, loadQueuedQueries]);
 
+  const runBatchReplay = useCallback(async () => {
+    if (batchRunning) return;
+
+    // Fetch a fresh list so we work on the latest queue state
+    setQueueLoading(true);
+    let freshItems: QueuedQuery[] = [];
+    try {
+      const res = await apiFetch<{ items?: QueuedQuery[] }>(
+        `/admin/query-queue?collection_name=${encodeURIComponent(currentCollection || '')}&limit=200`,
+      );
+      freshItems = res.items || [];
+      setQueuedQueries(freshItems);
+    } catch {
+      freshItems = [...queuedQueries];
+    } finally {
+      setQueueLoading(false);
+    }
+
+    const toProcess = freshItems.slice(0, batchCount);
+    if (toProcess.length === 0) return;
+
+    setBatchRunning(true);
+    batchAbortRef.current = false;
+    setBatchProgress({ done: 0, total: toProcess.length, current: '', errors: 0 });
+
+    let errors = 0;
+    for (let i = 0; i < toProcess.length; i++) {
+      if (batchAbortRef.current) break;
+
+      const item = toProcess[i];
+      setBatchProgress({ done: i, total: toProcess.length, current: item.query, errors });
+
+      try {
+        await search(item.query);
+        await apiFetch(`/admin/query-queue/${encodeURIComponent(item.id)}`, { method: 'DELETE' });
+      } catch {
+        errors += 1;
+      }
+    }
+
+    setBatchProgress((prev) => prev ? { ...prev, done: Math.min(toProcess.length, prev.done + 1), current: '', errors } : null);
+    setBatchRunning(false);
+    batchAbortRef.current = false;
+    await loadQueuedQueries();
+  }, [batchRunning, batchCount, queuedQueries, currentCollection, search, loadQueuedQueries]);
+
   const openPreview = (doc: SearchDocument) => {
     setPreviewContent(doc.content);
     setPreviewUrl(doc.url);
@@ -572,19 +624,24 @@ function KnowledgeBaseSearch() {
       <div className="mt-3 p-3 bg-gray-50 border border-gray-200 rounded-lg">
         <div className="flex flex-wrap items-center gap-2">
           <span className="text-sm font-medium text-gray-700">Queued Replay Queries</span>
+          <span className="text-xs text-gray-500 bg-gray-200 px-2 py-0.5 rounded-full">{queuedQueries.length}</span>
           <button
             onClick={() => void loadQueuedQueries()}
-            className="text-xs px-2 py-1 border rounded bg-white hover:bg-gray-100"
+            disabled={batchRunning}
+            className="text-xs px-2 py-1 border rounded bg-white hover:bg-gray-100 disabled:opacity-50"
           >
             Refresh
           </button>
           {queueLoading && <span className="text-xs text-gray-500">Loading...</span>}
         </div>
+
+        {/* Single replay row */}
         <div className="mt-2 flex flex-wrap gap-2 items-center">
           <select
             value={selectedQueueId}
             onChange={(e) => setSelectedQueueId(e.target.value)}
-            className="min-w-[320px] max-w-full px-2 py-1 border rounded bg-white text-sm"
+            disabled={batchRunning}
+            className="min-w-[320px] max-w-full px-2 py-1 border rounded bg-white text-sm disabled:opacity-50"
           >
             <option value="">Select queued query...</option>
             {groupedQueuedQueries.map((group) => (
@@ -599,11 +656,73 @@ function KnowledgeBaseSearch() {
           </select>
           <button
             onClick={() => void replaySelectedQuery()}
-            disabled={!selectedQueueId}
+            disabled={!selectedQueueId || batchRunning}
             className="btn-primary text-xs disabled:opacity-50"
           >
             Replay And Remove
           </button>
+        </div>
+
+        {/* Batch processing row */}
+        <div className="mt-3 pt-3 border-t border-gray-200">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="text-xs font-semibold text-gray-600 uppercase tracking-wide">Batch Auto-Process</span>
+            <label className="flex items-center gap-1 text-xs text-gray-600">
+              <span>Process</span>
+              <input
+                type="number"
+                min={1}
+                max={500}
+                value={batchCount}
+                onChange={(e) => setBatchCount(Math.max(1, parseInt(e.target.value) || 1))}
+                disabled={batchRunning}
+                className="w-16 px-2 py-1 border rounded text-xs disabled:opacity-50"
+              />
+              <span>entries sequentially</span>
+            </label>
+            {!batchRunning ? (
+              <button
+                onClick={() => void runBatchReplay()}
+                disabled={queuedQueries.length === 0}
+                className="text-xs px-3 py-1 bg-orange-600 hover:bg-orange-700 text-white rounded font-medium disabled:opacity-50"
+              >
+                ▶ Start Batch
+              </button>
+            ) : (
+              <button
+                onClick={() => { batchAbortRef.current = true; }}
+                className="text-xs px-3 py-1 bg-red-600 hover:bg-red-700 text-white rounded font-medium"
+              >
+                ⏹ Abort
+              </button>
+            )}
+          </div>
+
+          {/* Progress bar */}
+          {batchProgress && (
+            <div className="mt-2 space-y-1">
+              <div className="flex justify-between text-xs text-gray-600">
+                <span>
+                  {batchRunning
+                    ? `Processing ${batchProgress.done + 1} / ${batchProgress.total}…`
+                    : `Done — ${batchProgress.done} / ${batchProgress.total} processed`}
+                  {batchProgress.errors > 0 && (
+                    <span className="ml-2 text-red-600">{batchProgress.errors} error{batchProgress.errors !== 1 ? 's' : ''}</span>
+                  )}
+                </span>
+                <span>{Math.round(((batchProgress.done) / batchProgress.total) * 100)}%</span>
+              </div>
+              <div className="w-full bg-gray-200 rounded-full h-2">
+                <div
+                  className={`h-2 rounded-full transition-all duration-300 ${batchRunning ? 'bg-orange-500' : 'bg-green-500'}`}
+                  style={{ width: `${Math.round((batchProgress.done / batchProgress.total) * 100)}%` }}
+                />
+              </div>
+              {batchRunning && batchProgress.current && (
+                <p className="text-xs text-gray-500 truncate">Current: "{batchProgress.current}"</p>
+              )}
+            </div>
+          )}
         </div>
       </div>
 
