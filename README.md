@@ -1,3 +1,5 @@
+
+
 # Qdrant Proxy
 
 A FastAPI-based proxy service for Qdrant vector database providing advanced hybrid search, document storage, and FAQ knowledge base management.
@@ -96,7 +98,7 @@ Key configuration options (see `.env.example` for full list):
 
 This repository includes GitHub Actions workflows that automatically:
 
-- Build and push Docker images for all branches and tags
+- Build and push Docker images for all branches and `v*` tags
 - Create semantic version tags (e.g., `v1.2.3` → `1.2.3`, `1.2`, `1`)
 - Tag branch images (e.g., `main`, `develop`, `feature-xyz`)
 - Add commit SHA tags for precise versioning
